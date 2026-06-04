@@ -1,2 +1,18 @@
 CLAUDE.md
 AGENTS.md
+discussion.md
+
+# Python environment
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Generated datasets (regenerable from the pipeline; can be large)
+datasets/raw/
+datasets/processed/
+
+# Notebook checkpoints
+.ipynb_checkpoints/

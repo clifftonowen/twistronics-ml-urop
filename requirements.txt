@@ -1,0 +1,13 @@
+# Core dependencies for the data-generation pipeline (Phase 1).
+# Tested on Python 3.14.4 (Windows) inside .venv.
+numpy>=2.0
+scipy>=1.13
+matplotlib>=3.8
+tqdm>=4.66
+
+# --- Phase 2+ (forward surrogate / inverse design) ---
+# Installed later, once we start the ML models. Kept commented because
+# torch wheels may lag new Python releases (verify a 3.14 wheel exists
+# before relying on it; otherwise pin the project to Python 3.12/3.13).
+# torch>=2.3
+# scikit-learn>=1.4
