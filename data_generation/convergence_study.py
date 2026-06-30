@@ -6,37 +6,40 @@ The RCWA solver truncates the plane-wave basis at order N_m (passed as N=M).
 The twisted bilayer costs ~(2*N_m+1)^4 plane waves, so N_m is a hard
 accuracy/cost trade-off: too small silently poisons the surrogate with
 under-converged spectra, too large makes the dataset unaffordable. Smaller
-twist angles fold a larger moire supercell and need MORE harmonics, so the
-right N_m is twist-angle dependent. This script measures that dependence and
-recommends a per-twist-angle N_m policy that `generate_dataset.py` then applies.
+twist angles fold a larger moire supercell, and higher index contrast (a-Si)
+mixes more harmonics -- both need a LARGER N_m. This script measures those
+dependencies and recommends a per-twist-angle N_m policy (for the dataset's
+material) that `generate_dataset.py` then applies.
 
-WHAT IT DOES
-------------
-Part A (primary, yields the bins): one fixed "hard" geometry (large radius =
-sharp dielectric features, small gap = strong interlayer coupling) evaluated at
-several twist angles. At each angle it sweeps N_m and compares each spectrum to
-the highest-N reference.
+CONVERGENCE TRIAGE (important)
+------------------------------
+For lossless real-epsilon media the S-matrix is unitary by construction, so the
+energy residual |1-(R+T)| is ~machine-zero at ANY N_m -- it catches bugs, not
+under-convergence. The real signal is the spectrum change vs a higher-N
+reference. With the reference set to the largest swept N (N_ref), a design is:
+  * CONVERGED      if some N < N_ref already matches the reference within tol
+                   -> that smaller N is N* (safe to use).
+  * NEEDS_HIGHER_N if only N_ref itself meets tol -> we cannot prove N_ref is
+                   converged without going higher; flagged for a later (overnight)
+                   N=4+ run. High contrast (a-Si) and the smallest twists land here.
 
-Part B (optional, --robustness): a few geometry variants at the smallest twist
-angles, to confirm the chosen N_m is not sensitive to the other knobs.
-
-Convergence criterion (both must hold) at truncation N:
-    dCD(N)  = max_lambda |CD_N - CD_ref|          <= --tol-cd   (default 0.02)
-    res(N)  = max_lambda |1 - (R + T)|            <= --tol-e    (default 1e-3)
-N* is the smallest N meeting both. Smaller twist -> larger N*.
+Criterion at truncation N (both must hold):
+    dCD(N) = max_lambda |CD_N - CD_ref| <= --tol-cd  (default 0.02)
+    res(N) = max_lambda |1 - (R + T)|   <= --tol-e   (default 1e-3)
 
 Examples
 --------
 Fast smoke run (validates the script end-to-end in well under a minute):
     python -m data_generation.convergence_study --smoke
 
-Full study (minutes to tens of minutes; run in the background):
+Lighter material-spanning study (no N=4, no very-small twist -> low memory):
     python -m data_generation.convergence_study \
-        --angles 5 8 12 20 30 --N-values 1 2 3 4 --n-lam 26
+        --slabs Si3N4 TiO2 aSi --angles 8 12 20 30 --N-values 1 2 3 \
+        --n-lam 9 --resolution 256
 
-Cost/memory note: N=4 twisted is ~2.7x the channels of N=3 (which is already
-~7 GB / ~180 s per full spectrum). If RAM-bound, drop --resolution to 256 or
-cap --N-values at 4 and trust the trend rather than pushing to 5.
+Cost/memory note: N=4 twisted is ~2.7x the channels of N=3 and was the OOM
+culprit in earlier runs; this study caps at N=3 by default. Push to N>=4 only in
+a dedicated, un-contended (ideally overnight) run.
 """
 
 from __future__ import annotations
@@ -62,8 +65,7 @@ DEFAULT_OUT = os.path.join(
 # N_m that converges here is conservative for easier geometries at the same twist.
 HARD_GEOMETRY = {"thickness": 0.25, "gap": 0.05, "radius": 0.45}
 
-# Geometry variants for the robustness check (Part B). Each stresses a different
-# knob while staying inside parameter_sampler.BOUNDS.
+# Geometry variants for the optional robustness check (Part B).
 ROBUSTNESS_VARIANTS = {
     "thin_membrane": {"thickness": 0.10, "gap": 0.05, "radius": 0.45},
     "wide_gap_small_hole": {"thickness": 0.25, "gap": 0.45, "radius": 0.20},
@@ -71,36 +73,39 @@ ROBUSTNESS_VARIANTS = {
 
 
 class TestDesign:
-    """A labelled design to converge, plus which part of the study it belongs to."""
+    """A labelled (material, geometry) point to converge, tagged with its part."""
 
-    def __init__(self, label: str, part: str, params: DesignParams):
+    def __init__(self, label: str, part: str, material: str, params: DesignParams):
         self.label = label
         self.part = part
+        self.material = material
         self.params = params
 
 
 def build_test_designs(
-    angles: list[float], robustness: bool
+    angles: list[float], materials: list[str], policy_material: str, robustness: bool
 ) -> list[TestDesign]:
-    """Part A: hard geometry across twist angles. Part B (optional): geometry
-    variants at the two smallest angles to confirm the bins are geometry-robust."""
+    """Part A: hard geometry across (material x twist). Part B (optional):
+    geometry variants at the two smallest angles, policy-material only."""
     designs: list[TestDesign] = []
-    for ang in angles:
-        designs.append(
-            TestDesign(
-                f"A_theta{ang:g}",
-                "A",
-                DesignParams(theta_deg=float(ang), **HARD_GEOMETRY),
+    for mat in materials:
+        for ang in angles:
+            designs.append(
+                TestDesign(
+                    f"A_{mat}_theta{ang:g}",
+                    "A",
+                    mat,
+                    DesignParams(theta_deg=float(ang), **HARD_GEOMETRY),
+                )
             )
-        )
     if robustness:
-        small_angles = sorted(angles)[:2]
-        for ang in small_angles:
+        for ang in sorted(angles)[:2]:
             for name, geom in ROBUSTNESS_VARIANTS.items():
                 designs.append(
                     TestDesign(
-                        f"B_theta{ang:g}_{name}",
+                        f"B_{policy_material}_theta{ang:g}_{name}",
                         "B",
+                        policy_material,
                         DesignParams(theta_deg=float(ang), **geom),
                     )
                 )
@@ -120,28 +125,48 @@ def converged_n(
     return None
 
 
-def recommend_policy(per_design: list[dict]) -> list[dict]:
-    """Build a monotonic theta -> N_m step function from the Part-A results.
+def classify(n_star: int | None, n_ref: int) -> str:
+    """converged (n_star < n_ref) / needs_higher_N (n_star == n_ref) / unconverged."""
+    if n_star is None:
+        return "unconverged"
+    if n_star < n_ref:
+        return "converged"
+    return "needs_higher_N"
+
+
+def recommend_policy(
+    per_design: list[dict], policy_material: str, n_ref: int
+) -> list[dict]:
+    """Build a monotonic theta -> N_m step function from the policy material's
+    Part-A results.
 
     Rule applied downstream: for a given twist theta, use the N_m of the largest
-    tested angle <= theta (i.e. the harder, smaller-angle edge of its bin). We
-    enforce non-increasing N_m as theta grows (smaller twist never needs fewer
-    harmonics) by taking a running max from the largest angle downward, so solver
-    noise can't recommend too-small an N_m for a hard angle.
+    tested angle <= theta (the harder, smaller-angle edge of its bin). N_m is
+    forced non-increasing as theta grows (smaller twist never needs fewer
+    harmonics) via a running max from the largest angle down, so solver noise
+    can't recommend too small an N_m. NEEDS_HIGHER_N designs contribute N_ref as
+    a LOWER BOUND (real requirement may be larger -> confirm in the overnight run).
     """
     part_a = sorted(
-        (d for d in per_design if d["part"] == "A"),
+        (d for d in per_design if d["part"] == "A" and d["material"] == policy_material),
         key=lambda d: d["params"]["theta_deg"],
     )
-    # N* falls back to the highest swept N when the reference itself isn't converged.
     rows = []
     for d in part_a:
-        n_star = d["n_star"]
-        if n_star is None:
-            n_star = max(int(n) for n in d["delta_cd"])  # reference not converged
-        rows.append({"theta_min": d["params"]["theta_deg"], "N_m": int(n_star)})
+        if d["status"] == "converged":
+            n_m = int(d["n_star"])
+            lower_bound = False
+        else:  # needs_higher_N or unconverged -> N_ref is only a floor
+            n_m = n_ref
+            lower_bound = True
+        rows.append(
+            {
+                "theta_min": d["params"]["theta_deg"],
+                "N_m": n_m,
+                "lower_bound": lower_bound,
+            }
+        )
 
-    # Enforce monotonicity: walk from largest angle to smallest, ratchet N_m up.
     running = 0
     for r in reversed(rows):
         running = max(running, r["N_m"])
@@ -154,7 +179,6 @@ def run_study(
     wavelengths: np.ndarray,
     N_values: list[int],
     a_nm: float,
-    slab_material: str,
     hole_material: str,
     resolution: int,
     tol_cd: float,
@@ -164,8 +188,8 @@ def run_study(
     """Simulate every (design, N), compute diagnostics vs the highest-N reference.
 
     `on_design_done(per_design)` is called after each design so the caller can
-    persist partial results -- the N=4 runs are slow, and we don't want an
-    interrupted run (OOM, Ctrl-C) to discard hours of completed designs.
+    persist partial results -- a long run shouldn't lose finished designs if it
+    is interrupted.
     """
     n_ref = max(N_values)
     per_design: list[dict] = []
@@ -180,30 +204,28 @@ def run_study(
                 wavelengths,
                 a_nm=a_nm,
                 N=n,
-                slab_material=slab_material,
+                slab_material=d.material,
                 hole_material=hole_material,
                 resolution=resolution,
             )
             runtimes[n] = time.perf_counter() - t0
 
         cd_ref = spectra[n_ref].cd
-        delta_cd = {
-            n: float(np.max(np.abs(spectra[n].cd - cd_ref))) for n in N_values
-        }
-        max_res = {
-            n: float(spectra[n].energy_residual().max()) for n in N_values
-        }
+        delta_cd = {n: float(np.max(np.abs(spectra[n].cd - cd_ref))) for n in N_values}
+        max_res = {n: float(spectra[n].energy_residual().max()) for n in N_values}
         n_star = converged_n(delta_cd, max_res, tol_cd, tol_e)
 
         per_design.append(
             {
                 "label": d.label,
                 "part": d.part,
+                "material": d.material,
                 "params": d.params.as_dict(),
                 "delta_cd": delta_cd,
                 "max_energy_residual": max_res,
                 "runtime_s": {n: round(runtimes[n], 3) for n in N_values},
                 "n_star": n_star,
+                "status": classify(n_star, n_ref),
             }
         )
         if on_design_done is not None:
@@ -213,9 +235,9 @@ def run_study(
 
 def write_csv(per_design: list[dict], path: str) -> None:
     fields = [
-        "label", "part", "theta_deg", "thickness", "gap", "radius",
+        "label", "part", "material", "theta_deg", "thickness", "gap", "radius",
         "N", "delta_cd", "max_energy_residual", "runtime_s",
-        "is_reference", "n_star",
+        "is_reference", "n_star", "status",
     ]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -227,6 +249,7 @@ def write_csv(per_design: list[dict], path: str) -> None:
                     {
                         "label": d["label"],
                         "part": d["part"],
+                        "material": d["material"],
                         **{k: d["params"][k] for k in PARAM_NAMES},
                         "N": n,
                         "delta_cd": f"{d['delta_cd'][n]:.6e}",
@@ -234,62 +257,75 @@ def write_csv(per_design: list[dict], path: str) -> None:
                         "runtime_s": d["runtime_s"][n],
                         "is_reference": n == n_ref,
                         "n_star": d["n_star"],
+                        "status": d["status"],
                     }
                 )
 
 
-def write_plots(per_design: list[dict], path: str) -> str | None:
-    """Overview figure: dCD-vs-N and energy-residual-vs-N for the Part-A angles.
-    Returns the path written, or None if matplotlib is unavailable."""
+def write_plots(per_design: list[dict], out_dir: str) -> list[str]:
+    """One dCD-vs-N figure per material (Part A). Returns the paths written, or
+    [] if matplotlib is unavailable."""
     try:
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except Exception:
-        return None
+        return []
 
-    part_a = sorted(
-        (d for d in per_design if d["part"] == "A"),
-        key=lambda d: d["params"]["theta_deg"],
-    )
-    if not part_a:
-        return None
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
-    for d in part_a:
-        ns = sorted(int(n) for n in d["delta_cd"])
-        label = f"theta={d['params']['theta_deg']:g} deg"
-        ax1.plot(ns, [d["delta_cd"][n] for n in ns], "o-", label=label)
-        ax2.semilogy(
-            ns, [max(d["max_energy_residual"][n], 1e-16) for n in ns], "o-", label=label
+    materials = sorted({d["material"] for d in per_design if d["part"] == "A"})
+    written = []
+    for mat in materials:
+        rows = sorted(
+            (d for d in per_design if d["part"] == "A" and d["material"] == mat),
+            key=lambda d: d["params"]["theta_deg"],
         )
-    ax1.set(xlabel="N_m", ylabel="max |CD(N) - CD(ref)|", title="CD convergence")
-    ax2.set(xlabel="N_m", ylabel="max |1 - (R+T)|", title="Energy residual")
-    ax1.legend(fontsize=8)
-    ax1.grid(True, alpha=0.3)
-    ax2.grid(True, alpha=0.3, which="both")
-    fig.tight_layout()
-    fig.savefig(path, dpi=120)
-    plt.close(fig)
-    return path
+        if not rows:
+            continue
+        fig, ax = plt.subplots(figsize=(6, 4.2))
+        for d in rows:
+            ns = sorted(int(n) for n in d["delta_cd"])
+            ax.semilogy(
+                ns,
+                [max(d["delta_cd"][n], 1e-16) for n in ns],
+                "o-",
+                label=f"theta={d['params']['theta_deg']:g} ({d['status']})",
+            )
+        max_res = max(max(d["max_energy_residual"].values()) for d in rows)
+        ax.set(
+            xlabel="N_m",
+            ylabel="max |CD(N) - CD(ref)|",
+            title=f"{mat} CD convergence  (max energy res {max_res:.1e})",
+        )
+        ax.grid(True, alpha=0.3, which="both")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        path = os.path.join(out_dir, f"convergence_{mat}.png")
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        written.append(path)
+    return written
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--angles", type=float, nargs="+", default=[5, 8, 12, 20, 30],
+    p.add_argument("--slabs", nargs="+", default=["Si3N4", "TiO2", "aSi"],
+                   help="slab materials to test (see materials.py)")
+    p.add_argument("--policy-material", default="Si3N4",
+                   help="material whose convergence defines the theta->N_m policy "
+                   "used by the v1 dataset")
+    p.add_argument("--angles", type=float, nargs="+", default=[8, 12, 20, 30],
                    help="twist angles (deg) to test for convergence")
-    p.add_argument("--N-values", type=int, nargs="+", default=[1, 2, 3, 4],
+    p.add_argument("--N-values", type=int, nargs="+", default=[1, 2, 3],
                    help="harmonic truncations to sweep; the largest is the reference")
     p.add_argument("--a-nm", type=float, default=500.0, help="lattice constant in nm")
     p.add_argument("--lam-min", type=float, default=600.0, help="min wavelength nm")
     p.add_argument("--lam-max", type=float, default=850.0, help="max wavelength nm")
-    p.add_argument("--n-lam", type=int, default=26, help="wavelength grid points")
-    p.add_argument("--slab", default="Si3N4", help="slab material name")
+    p.add_argument("--n-lam", type=int, default=9, help="wavelength grid points")
     p.add_argument("--hole", default="air", help="hole-fill material name")
-    p.add_argument("--resolution", type=int, default=512, help="eps-map grid resolution")
+    p.add_argument("--resolution", type=int, default=256, help="eps-map grid resolution")
     p.add_argument("--tol-cd", type=float, default=0.02, help="max |dCD| to call converged")
     p.add_argument("--tol-e", type=float, default=1e-3, help="max energy residual to call converged")
     p.add_argument("--robustness", action="store_true",
@@ -297,7 +333,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=DEFAULT_OUT, help="output directory")
     p.add_argument(
         "--smoke", action="store_true",
-        help="tiny fast config (2 angles, N=[1,2], 6 wavelengths, low resolution)",
+        help="tiny fast config (1 material, 2 angles, N=[1,2], 6 wavelengths, low res)",
     )
     return p
 
@@ -306,6 +342,7 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
     args = build_arg_parser().parse_args(argv)
 
     if args.smoke:
+        args.slabs = [args.policy_material]
         args.angles = [args.angles[0], args.angles[-1]]
         args.N_values = [1, 2]
         args.n_lam = 6
@@ -313,28 +350,31 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
         args.robustness = False
 
     N_values = sorted(set(int(n) for n in args.N_values))
+    n_ref = N_values[-1]
     wavelengths = np.linspace(args.lam_min, args.lam_max, args.n_lam)
-    designs = build_test_designs(args.angles, args.robustness)
+    designs = build_test_designs(
+        args.angles, args.slabs, args.policy_material, args.robustness
+    )
 
     print(
-        f"Convergence study | angles={args.angles} deg | N={N_values} "
-        f"(ref={N_values[-1]}) | {len(designs)} designs | "
-        f"lambda {args.lam_min}-{args.lam_max} nm x{args.n_lam} | "
-        f"slab={args.slab} | tol_cd={args.tol_cd} tol_e={args.tol_e:g}"
+        f"Convergence study | materials={args.slabs} (policy={args.policy_material}) "
+        f"| angles={args.angles} deg | N={N_values} (ref={n_ref}) "
+        f"| {len(designs)} designs | lambda {args.lam_min}-{args.lam_max} nm "
+        f"x{args.n_lam} | res={args.resolution} | tol_cd={args.tol_cd}"
     )
 
     os.makedirs(args.out, exist_ok=True)
     csv_path = os.path.join(args.out, "convergence_results.csv")
     json_path = os.path.join(args.out, "convergence_summary.json")
-    png_path = os.path.join(args.out, "convergence_overview.png")
 
     config = {
+        "slabs": list(args.slabs),
+        "policy_material": args.policy_material,
         "angles_deg": list(args.angles),
         "N_values": N_values,
-        "N_ref": N_values[-1],
+        "N_ref": n_ref,
         "a_nm": args.a_nm,
         "wavelength_grid_nm": [args.lam_min, args.lam_max, args.n_lam],
-        "slab_material": args.slab,
         "hole_material": args.hole,
         "eps_map_resolution": args.resolution,
         "tol_cd": args.tol_cd,
@@ -342,17 +382,21 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
         "hard_geometry": HARD_GEOMETRY,
         "robustness": args.robustness,
         "smoke": args.smoke,
+        # The policy is only validated at/above the smallest tested angle; smaller
+        # twists (and any needs_higher_N material) require the overnight N>=4 run.
+        "policy_validated_above_deg": float(min(args.angles)),
     }
 
     def persist(per_design: list[dict], elapsed: float | None = None) -> None:
-        """Write CSV + JSON from whatever designs have finished so far."""
         write_csv(per_design, csv_path)
         summary = {
             "config": config,
             "per_design": per_design,
-            "recommended_policy": recommend_policy(per_design),
-            "reference_unconverged_designs": [
-                d["label"] for d in per_design if d["n_star"] is None
+            "recommended_policy": recommend_policy(
+                per_design, args.policy_material, n_ref
+            ),
+            "needs_higher_N": [
+                d["label"] for d in per_design if d["status"] != "converged"
             ],
             "complete": elapsed is not None,
             "wall_time_s": round(elapsed, 2) if elapsed is not None else None,
@@ -363,42 +407,46 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
     t0 = time.perf_counter()
     per_design = run_study(
         designs, wavelengths, N_values,
-        a_nm=args.a_nm, slab_material=args.slab, hole_material=args.hole,
-        resolution=args.resolution, tol_cd=args.tol_cd, tol_e=args.tol_e,
-        on_design_done=persist,
+        a_nm=args.a_nm, hole_material=args.hole, resolution=args.resolution,
+        tol_cd=args.tol_cd, tol_e=args.tol_e, on_design_done=persist,
     )
     elapsed = time.perf_counter() - t0
 
     persist(per_design, elapsed)
-    policy = recommend_policy(per_design)
-    unconverged = [d["label"] for d in per_design if d["n_star"] is None]
-    plotted = write_plots(per_design, png_path)
+    policy = recommend_policy(per_design, args.policy_material, n_ref)
+    needs_higher = [d["label"] for d in per_design if d["status"] != "converged"]
+    plotted = write_plots(per_design, args.out)
 
     print(f"\nDone in {elapsed:.1f}s.")
-    print("Per-angle N* (Part A):")
+    print("Per (material, angle) result:")
     for d in sorted(
         (d for d in per_design if d["part"] == "A"),
-        key=lambda d: d["params"]["theta_deg"],
+        key=lambda d: (d["material"], d["params"]["theta_deg"]),
     ):
-        star = d["n_star"] if d["n_star"] is not None else "NONE(ref unconverged)"
-        print(f"  theta={d['params']['theta_deg']:>5g} deg -> N* = {star}")
-
-    print("Recommended theta -> N_m policy (conservative, monotonic):")
-    for r in policy:
-        print(f"  theta >= {r['theta_min']:>5g} deg -> N_m = {r['N_m']}")
-
-    if unconverged:
+        star = d["n_star"] if d["n_star"] is not None else "-"
         print(
-            "\nWARNING: reference N did not converge for: "
-            + ", ".join(unconverged)
-            + "\n  -> raise --N-values (and/or lower --resolution to fit memory)."
+            f"  {d['material']:>6s} theta={d['params']['theta_deg']:>4g} deg "
+            f"-> N* = {star}  [{d['status']}]"
+        )
+
+    print(f"\nRecommended theta -> N_m policy for {args.policy_material} "
+          f"(validated for theta >= {min(args.angles):g} deg):")
+    for r in policy:
+        flag = "  (LOWER BOUND - confirm overnight)" if r["lower_bound"] else ""
+        print(f"  theta >= {r['theta_min']:>4g} deg -> N_m = {r['N_m']}{flag}")
+
+    if needs_higher:
+        print(
+            "\nNEEDS HIGHER-N (overnight) confirmation -- N_ref met tol but no "
+            "smaller N did, so N_ref convergence is unproven:\n  "
+            + ", ".join(needs_higher)
         )
 
     paths = {"csv": csv_path, "summary": json_path}
-    if plotted:
-        paths["plot"] = png_path
-    else:
-        print("(matplotlib unavailable -> skipped PNG; CSV/JSON written.)")
+    for i, pth in enumerate(plotted):
+        paths[f"plot{i}"] = pth
+    if not plotted:
+        print("(matplotlib unavailable -> skipped PNGs; CSV/JSON written.)")
     for k, v in paths.items():
         print(f"  {k:8s}: {v}")
     return paths
