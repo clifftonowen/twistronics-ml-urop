@@ -5,13 +5,13 @@ Examples
 Tiny smoke run (proves the pipeline end-to-end in seconds):
     python -m data_generation.generate_dataset --smoke
 
-A small real shard (adjust as the parameter ranges in CLAUDE.md firm up):
+A small real shard (adjust as the parameter ranges firm up):
     python -m data_generation.generate_dataset \
         --n 200 --N 3 --a-nm 500 --lam-min 600 --lam-max 850 --n-lam 51 \
         --seed 0 --shard shard000
 
 Cost warning: the twisted bilayer scales as (2N+1)^4 plane waves. N=3 is ~minutes
-per spectrum (CLAUDE.md section 4). Start small, run a convergence check, and
+per spectrum. Start small, run a convergence check, and
 scale N only as needed for the twist/contrast regime you are sampling.
 """
 

@@ -7,7 +7,7 @@ transmission circular dichroism
 
     CD(lambda) = (T_RCP - T_LCP) / (T_RCP + T_LCP)   in [-1, +1]
 
-(CLAUDE.md section 3; transmission definition, fixed project-wide).
+(transmission definition, fixed project-wide).
 
 Layer stack handed to the solver (matches example3-convergence-check.ipynb):
     epsr_list   = [slab_eps, None, slab_eps]   # bottom slab, gap, top slab
@@ -25,7 +25,7 @@ CONVENTIONS / KNOBS
     The RCP/LCP *labelling* is a sign convention tied to the solver's exp(-iwt)
     time dependence; flipping it flips the sign of CD. What matters physically
     is consistency, and that twisting turns CD on while an untwisted C4v bilayer
-    gives CD ~ 0 (symmetry sanity check, CLAUDE.md section 8).
+    gives CD ~ 0 (symmetry sanity check).
   * For a fixed (freq, angle) the scattering matrix Sg depends only on geometry
     and k, not on the input polarization. set_freq_k() resets Sg; the first
     get_RT() solves it and the second reuses it -- so RCP and LCP cost ~one
@@ -163,7 +163,7 @@ def convergence_sweep(
 
     Compare the returned spectra (e.g. max |CD(N) - CD(N_max)|) to pick the
     smallest N that is converged for the parameter regime you intend to sample
-    (CLAUDE.md section 4: smaller twist / higher index contrast need larger N).
+    (smaller twist / higher index contrast need larger N).
     """
     return {
         N: simulate_design(params, wavelengths_nm, N=N, **kwargs)

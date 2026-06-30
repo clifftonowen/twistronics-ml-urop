@@ -5,7 +5,7 @@ lattice of circular holes (one hole per unit cell). The RCWA solver expands
 this map in a Fourier (plane-wave) basis via `convmat2D`, so we only need to
 hand it a 2D grid of epsilon_r sampled over one unit cell.
 
-Conventions (match the rcwa4d example notebooks and CLAUDE.md section 7):
+Conventions (match the rcwa4d example notebooks):
   * The unit cell spans [-0.5, 0.5] x [-0.5, 0.5] in units of the lattice
     constant `a`. ALL lengths (hole radius, later the slab thickness and gap)
     are expressed as fractions of `a`. The solver runs with a = 1 (normalized),

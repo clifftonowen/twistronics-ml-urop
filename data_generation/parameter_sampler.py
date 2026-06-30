@@ -1,6 +1,6 @@
 """Sample structural design parameters X for the dataset.
 
-The model input X for a twisted bilayer PhC (CLAUDE.md section 1):
+The model input X for a twisted bilayer PhC:
   * twist angle      theta  [degrees]
   * slab thickness   t      [units of a]
   * interlayer gap   d      [units of a]   (primary chirality knob)
@@ -13,10 +13,10 @@ material / lattice-constant dimensions later is a matter of widening BOUNDS.
 Sampling uses a Latin Hypercube (scipy.stats.qmc) for even coverage of the
 4-D box with few points -- far better than i.i.d. uniform at small N. Each
 sample is an independent *structure*; the train/val/test split downstream is
-by structure (CLAUDE.md section 7), which is automatic here since no two rows
+by structure, which is automatic here since no two rows
 share a sweep.
 
-DESIGN-RANGE RATIONALE (defaults; revise in CLAUDE.md section 9 as we learn):
+DESIGN-RANGE RATIONALE (defaults):
   * theta 5-30 deg: large twists keep the moire supercell small and the solver
     cheap (cost ~ (2*N_m+1)^4). Sub-degree twists are the expensive regime and
     are deliberately excluded from v1.

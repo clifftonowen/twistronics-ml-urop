@@ -1,6 +1,6 @@
 """Assemble per-design solver outputs into ML-ready, normalized tensors.
 
-Responsibilities (CLAUDE.md sections 5-7):
+Responsibilities:
   * stack designs into X (n, n_params) and the response Y (n, n_lambda);
   * persist raw, un-normalized arrays in datasets/raw/ for re-processing;
   * fit and SAVE feature/target scalers alongside datasets/processed/ so that

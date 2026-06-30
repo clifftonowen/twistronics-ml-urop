@@ -11,9 +11,6 @@ instead would make `rcwa4d` resolve to the submodule root, which is a bare
 directory with no __init__.py -> a namespace package that exposes none of the
 solver code. We therefore insert the submodule root specifically.
 
-NOTE: CLAUDE.md (section 6) refers to this submodule as `rcwa_solver/`. The
-checked-out path is actually `rcwa4d/`; this module is the single source of
-truth for the location, so the rest of the pipeline never hard-codes it.
 """
 
 from __future__ import annotations
