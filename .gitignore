@@ -13,6 +13,9 @@ __pycache__/
 # Generated datasets (regenerable from the pipeline; can be large)
 datasets/raw/
 datasets/processed/
+# Convergence-study artifacts (CSV/JSON/PNG); the chosen N_m bins are recorded
+# in README + data_generation/convergence.py, so these can be regenerated.
+datasets/convergence/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
