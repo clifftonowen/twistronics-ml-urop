@@ -4,7 +4,7 @@ Run this first (and in CI) to confirm:
   1. the scientific stack imports;
   2. the rcwa4d solver submodule is importable from a pipeline script;
   3. a minimal untwisted solve conserves energy (R + T ~= 1, lossless);
-  4. SYMMETRY SANITY (CLAUDE.md section 8): an untwisted C4v bilayer gives
+  4. SYMMETRY SANITY: an untwisted C4v bilayer gives
      CD ~= 0 at normal incidence, and twisting it turns CD on.
 
 Usage:
