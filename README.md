@@ -134,7 +134,20 @@ python -m data_generation.generate_dataset `
 ```
 
 `N_m` is chosen per design by `data_generation/convergence.py` (v1 = flat `N=2`);
-pass `--N` to override it with a single fixed truncation, as above.
+pass `--N` to override it with a single fixed truncation, as above. Pass
+`--workers K` to simulate designs in `K` parallel processes (near-linear
+speedup at N=2; mind memory at N=3, ~7 GB/spectrum, so keep `K` small there).
+
+Because v1 materials are **non-dispersive**, the solver output depends only on
+the normalized frequency `f = a/λ` (and incident angle) — not on `a_nm`
+separately. So `--lam-min/--lam-max` (which fix an `f` range *for the given
+`--a-nm`*) are really just a convenience; pass `--f-min/--f-max` instead to
+sample a wide, `a_nm`-independent frequency band directly. `a_nm` then becomes
+a **free, zero-cost, post-hoc choice** at analysis time — re-labelling
+`λ = a_nm / f` on already-simulated data — which is how the "lattice-constant
+scan to land sharp CD features in 600–850 nm" roadmap item gets done without
+running the solver again. This trick stops working once dispersive `n(λ)` is
+introduced (then a_nm and λ are coupled through the material itself).
 
 Outputs land in `datasets/`:
 
@@ -157,6 +170,10 @@ in every shard's metadata.
   the lattice constant `a`; the solver runs with `a = 1`. Physical wavelength enters
   only through the normalized frequency `f = a / λ`, so the lattice constant in
   nanometres (`a_nm`) is what places resonances inside the 600–850 nm window.
+  **`f` is the canonical, dataset-portable axis** (stored as `freqs` in every raw
+  shard); `wavelengths_nm` is just that axis labelled at the shard's `a_nm`. While
+  materials stay non-dispersive, `a_nm` can be freely re-chosen after the fact —
+  see "Generating data" above.
 - **Materials** are non-dispersive constants in v1. True `n(λ)` dispersion is a
   planned refinement (it requires rebuilding the permittivity map per wavelength).
 - **Convergence.** The harmonic truncation `N_m` controls accuracy and cost; the
