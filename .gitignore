@@ -17,5 +17,8 @@ datasets/processed/
 # in README + data_generation/convergence.py, so these can be regenerated.
 datasets/convergence/
 
+# Trained models + eval artifacts (regenerable from the pipeline)
+models/artifacts/
+
 # Notebook checkpoints
 .ipynb_checkpoints/
