@@ -113,8 +113,11 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
     elapsed = time.perf_counter() - t0
 
     adaptive_used = args.N is None and args.adaptive_nm
+    unique_nm = sorted(set(n_m_per_design))
     metadata = {
-        "N_m": "adaptive" if adaptive_used else n_m_per_design[0],
+        # a single int when every design used the same N_m (the v1 flat case),
+        # else "adaptive" -- the per-design list and policy carry the detail.
+        "N_m": unique_nm[0] if len(unique_nm) == 1 else "adaptive",
         "N_m_per_design": n_m_per_design,
         "N_m_policy": [list(b) for b in N_M_POLICY] if adaptive_used else None,
         "a_nm": args.a_nm,
