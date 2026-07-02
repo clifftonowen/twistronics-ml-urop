@@ -25,7 +25,11 @@ This repository currently covers stage 1.
 | 1 | Parameter sampling (θ, t, gap, r) | Done |
 | 1 | RCWA driver → CD spectra | Done |
 | 1 | Dataset compiler (tensors, scalers, metadata) | Done |
-| 1 | N_m convergence study | Next |
+| 1 | N_m convergence study (Si₃N₄, TiO₂) | Done — see findings below |
+| 1 | Per-design N_m policy + adaptive hook | Done (v1 = flat N=2) |
+| 1 | Stage-1 walkthrough notebook | Done |
+| 1 | v1 dataset (fixed N=2, approximate) | Next |
+| 1 | a-Si convergence + N≥3 confirmation | Deferred (needs faster compute) |
 | 1 | Materials + incident angle as input dimensions | Planned |
 | 2 | Forward surrogate | Not started |
 | 3 | Inverse design (tandem / generative) | Not started |
@@ -33,6 +37,26 @@ This repository currently covers stage 1.
 The pipeline passes its physics sanity checks: energy is conserved to machine
 precision for lossless media, an untwisted (achiral) bilayer returns CD ≈ 0, and
 introducing a twist turns CD on. See `scripts/check_setup.py`.
+
+### N_m convergence study — findings
+
+`data_generation/convergence_study.py` sweeps the harmonic truncation `N_m` over
+representative (material, twist) points and compares each spectrum to the
+highest-`N` reference. Two results shape the dataset plan:
+
+- **Cost wall.** On current hardware a twisted spectrum costs ~3–11 s at `N=1`,
+  ~1.5 min at `N=2`, and **~33 min at `N=3`** (cost ∝ `(2N_m+1)⁴`). A converged
+  (`N≥3`) dataset is multi-day and not feasible yet; **`N=2` is the practical
+  ceiling** for a sizeable dataset.
+- **No clean twist trend (8–30°).** Si₃N₄ convergence is not monotonic in twist:
+  the absolute CD error is dominated by CD *magnitude* (high-twist designs have
+  larger CD), so binning `N_m` by twist is unsupported. **v1 uses a flat `N=2`.**
+
+So the v1 dataset is **approximate ("v0")**: accurate at low twist, but
+under-resolved (CD off by ~0.05–0.07) at high twist and for higher-contrast
+materials. It is meant to stand up the forward surrogate, not to report final
+device numbers. A converged dataset awaits faster compute (GPU/cluster) or a
+solver-usage speedup.
 
 ## Layout
 
@@ -44,13 +68,18 @@ introducing a twist turns CD on. See `scripts/check_setup.py`.
 │   ├── geometry.py           # builds the unit-cell permittivity map
 │   ├── parameter_sampler.py  # Latin-hypercube sampling of design parameters
 │   ├── simulate_spectra.py   # drives RCWA-4D → T_RCP, T_LCP, CD
+│   ├── convergence_study.py  # N_m convergence study (material × twist sweep)
+│   ├── convergence.py        # per-design N_m policy (v1 = flat N=2)
 │   ├── dataset_compiler.py   # stacks results into X/Y tensors + scalers + metadata
 │   └── generate_dataset.py   # command-line entry point
+├── notebooks/
+│   └── 01_data_exploration.ipynb  # narrated Stage-1 walkthrough
 ├── scripts/
 │   └── check_setup.py        # environment + solver health check
 ├── datasets/                 # generated data (git-ignored)
 │   ├── raw/                  # full solver outputs, kept for reprocessing
-│   └── processed/            # normalized tensors + scalers + metadata
+│   ├── processed/            # normalized tensors + scalers + metadata
+│   └── convergence/          # convergence-study CSV / JSON / plots
 ├── rcwa4d/                   # git submodule: fork of fancompute/rcwa4d
 │   └── rcwa4d/               # solver package (utils.py, expansion4d.py)
 ├── requirements.txt
@@ -96,11 +125,16 @@ python -m data_generation.generate_dataset --smoke
 A real shard, with parameters spelled out:
 
 ```powershell
+# v1 (approximate) shard: fixed N=2, reduced grid -- ~8-12 h, fits an overnight run.
+# (N=3 would be accurate but ~days on current hardware; see the findings above.)
 python -m data_generation.generate_dataset `
-    --n 200 --N 3 --a-nm 500 `
-    --lam-min 600 --lam-max 850 --n-lam 51 `
-    --seed 0 --shard shard000
+    --n 120 --N 2 --a-nm 500 `
+    --lam-min 600 --lam-max 850 --n-lam 26 `
+    --seed 0 --shard v0_n120
 ```
+
+`N_m` is chosen per design by `data_generation/convergence.py` (v1 = flat `N=2`);
+pass `--N` to override it with a single fixed truncation, as above.
 
 Outputs land in `datasets/`:
 
@@ -126,15 +160,20 @@ in every shard's metadata.
 - **Materials** are non-dispersive constants in v1. True `n(λ)` dispersion is a
   planned refinement (it requires rebuilding the permittivity map per wavelength).
 - **Convergence.** The harmonic truncation `N_m` controls accuracy and cost; the
-  twisted bilayer scales as `(2N_m + 1)^4`. Run a convergence study before trusting
-  a batch — under-converged spectra poison the surrogate without any obvious symptom.
+  twisted bilayer scales as `(2N_m + 1)^4`. Judge convergence by the **spectrum
+  change vs a higher-`N` reference** (`max_λ |CD_N − CD_ref|`), not by the energy
+  residual: for lossless real-`ε` media the solver's scattering matrix is unitary
+  by construction, so `|1 − (R+T)|` stays ~machine-zero at *any* `N_m` — it catches
+  bugs, not under-convergence. v1 uses a cost-driven flat `N=2` (see Status).
 
 ## Roadmap
 
 Near term, to finish a trustworthy stage-1 dataset:
 
-- **Convergence study** across `N_m` to pick the smallest accurate truncation for the
-  twist-angle range we sample.
+- **Converged dataset.** The v1 dataset is approximate (flat `N=2`, cost-driven).
+  Reaching a converged (`N≥3`) dataset — and confirming a-Si — needs faster compute
+  (GPU/cluster) or a solver-usage speedup (the twisted path re-expands the
+  plane-wave basis every wavelength, a likely optimization target).
 - **Lattice-constant scan** to land sharp CD features in 600–850 nm.
 - **Extend the design space** so the dataset matches the planned model inputs:
   - materials (Si₃N₄, a-Si, TiO₂) as a categorical input dimension;
