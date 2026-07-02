@@ -15,7 +15,7 @@ is three-staged:
 3. **Train an inverse/generative model** that maps a *target* CD spectrum back to
    physical design parameters, with every proposal re-verified in RCWA-4D.
 
-This repository currently covers stage 1.
+This repository currently covers stages 1–2.
 
 ## Status
 
@@ -28,10 +28,12 @@ This repository currently covers stage 1.
 | 1 | N_m convergence study (Si₃N₄, TiO₂) | Done — see findings below |
 | 1 | Per-design N_m policy + adaptive hook | Done (v1 = flat N=2) |
 | 1 | Stage-1 walkthrough notebook | Done |
-| 1 | v1 dataset (fixed N=2, approximate) | Next |
-| 1 | a-Si convergence + N≥3 confirmation | Deferred (needs faster compute) |
+| 1 | v1 dataset (`v0_n120`, fixed N=2, approximate) | Done |
+| 1 | Multiprocessing (`--workers`) + frequency-axis sampling (`--f-min/--f-max`) | Done |
+| 1 | GPU (CuPy) offload for solver linear algebra | Prototyped, accuracy-validated; end-to-end speedup still modest (~1.7-2.7×) pending a matmul offload — see `EXPERIMENTS.md` |
+| 1 | a-Si convergence + N≥3 confirmation | Deferred (needs the matmul offload above) |
 | 1 | Materials + incident angle as input dimensions | Planned |
-| 2 | Forward surrogate | Not started |
+| 2 | Forward surrogate (transmission target) | Done — CD target not yet learnable, see findings below |
 | 3 | Inverse design (tandem / generative) | Not started |
 
 The pipeline passes its physics sanity checks: energy is conserved to machine
