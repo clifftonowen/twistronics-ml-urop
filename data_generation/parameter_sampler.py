@@ -43,6 +43,27 @@ BOUNDS: dict[str, tuple[float, float]] = {
     "radius": (0.10, 0.45),
 }
 
+# High-CD focused box (EXPERIMENTS.md Sec 5): mined from v0_n120 by rank
+# correlation of each parameter with peak |CD| -- thickness (+0.43) and twist
+# (+0.37) correlate most strongly, radius weakly (+0.22), gap weakly and
+# inversely (-0.21). Top-15 CD designs in v0 clustered at theta 15-30
+# (med 25), t 0.25-0.40 (med 0.31), gap 0-0.25 (med 0.18), r 0.15-0.37
+# (med 0.22). Narrowing BOUNDS to this box concentrates sampling density in
+# the strong-CD region instead of spending most of the LHS budget on
+# near-achiral (weak-CD) structures, which is what v0's uniform box did.
+HIGH_CD_BOUNDS: dict[str, tuple[float, float]] = {
+    "theta_deg": (15.0, 30.0),
+    "thickness": (0.25, 0.40),
+    "gap": (0.00, 0.25),
+    "radius": (0.15, 0.35),
+}
+
+# Named presets selectable via generate_dataset.py --box.
+BOX_PRESETS: dict[str, dict[str, tuple[float, float]]] = {
+    "full": BOUNDS,
+    "high_cd": HIGH_CD_BOUNDS,
+}
+
 PARAM_NAMES = list(BOUNDS.keys())
 
 
