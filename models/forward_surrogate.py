@@ -4,7 +4,7 @@ Learns X = (theta, thickness, gap, radius) -> optical response with a fast model
 as a stand-in for the RCWA solver inside design loops.
 
 Choose the target and the model:
-  --target  cd | t_rcp | t_lcp | both_t | mean_t
+  --target  cd | t_rcp | t_lcp | both_t | mean_t | delta_t
   --model   mlp | gp
 
 Why the choice matters (measured on v0_n120, 120 designs)
@@ -40,7 +40,7 @@ DEFAULT_PROC = os.path.join(ROOT, "datasets", "processed")
 DEFAULT_RAW = os.path.join(ROOT, "datasets", "raw")
 ARTIFACTS = os.path.join(os.path.dirname(__file__), "artifacts")
 
-TARGETS = ("cd", "t_rcp", "t_lcp", "both_t", "mean_t")
+TARGETS = ("cd", "t_rcp", "t_lcp", "both_t", "mean_t", "delta_t")
 
 
 def set_seed(seed: int) -> None:
@@ -64,6 +64,13 @@ def load_dataset(shard: str, target: str, proc_dir=DEFAULT_PROC, raw_dir=DEFAULT
         Y = 0.5 * (raw["T_RCP"] + raw["T_LCP"])
     elif target == "both_t":
         Y = np.concatenate([raw["T_RCP"], raw["T_LCP"]], axis=1)  # (n, 2*n_lambda)
+    elif target == "delta_t":
+        # Unnormalized T_RCP - T_LCP, regressed directly (not via two separately
+        # predicted T's, which v0 showed performs worse: R2=-0.04). Recovers CD
+        # downstream via CD = delta_t / (T_RCP+T_LCP), using the (learnable)
+        # T-sum -- avoids baking the 1/(T_RCP+T_LCP) noise-amplifying divide
+        # into the training loss itself.
+        Y = raw["T_RCP"] - raw["T_LCP"]
     else:
         raise ValueError(f"unknown target {target!r}; choose from {TARGETS}")
     return X, Y.astype(np.float32), wl
