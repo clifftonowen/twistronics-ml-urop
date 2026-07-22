@@ -31,10 +31,27 @@ ARTIFACTS = os.path.join(ROOT, "models", "artifacts")
 
 
 def synthetic_case(lam0s, gammas, qs, amps, bg=0.5, lam_range=(600, 850), n_lam=301, noise=0.0, seed=0):
+    """Build a synthetic multi-Fano spectrum, rescaled to respect T in [0,1]
+    (real T_RCP/T_LCP are transmission coefficients and can never leave that
+    range -- `fit_resonance` now enforces this on FITTED curves, so the
+    synthetic ground truth must respect it too or the comparison is invalid;
+    an unscaled Fano with amp=0.3, q=2, bg=0.5 peaks at 1.7, already outside
+    [0,1] by construction). The rescale is linear about bg (y -> bg + k*(y-bg))
+    so it changes only overall amplitude, not lineshape/Q -- ground-truth Q
+    is unaffected.
+    """
     lam = np.linspace(*lam_range, n_lam)
     y = np.full_like(lam, bg)
     for l0, g, q, a in zip(lam0s, gammas, qs, amps):
         y += fano_lineshape(lam, l0, g, q, a, 0.0)
+
+    y_lo, y_hi = float(np.min(y)), float(np.max(y))
+    headroom_lo, headroom_hi = bg - 0.05, 0.95 - bg
+    k_lo = headroom_lo / (bg - y_lo) if y_lo < bg else float("inf")
+    k_hi = headroom_hi / (y_hi - bg) if y_hi > bg else float("inf")
+    k = min(1.0, k_lo, k_hi)
+    y = bg + k * (y - bg)
+
     if noise > 0:
         rng = np.random.default_rng(seed)
         y = y + rng.normal(0, noise, size=y.shape)
@@ -103,7 +120,7 @@ def run_real(shard: str = "highcd_n3_gpu_merged60") -> None:
         res_lcp = fit_spectrum(dense_wl, t_lcp, window_nm=60.0)
         good_rcp = [f for f in res_rcp if f.success and f.r2 > 0.8]
         good_lcp = [f for f in res_lcp if f.success and f.r2 > 0.8]
-        pairs = match_rcp_lcp_modes(res_rcp, res_lcp, max_split_nm=15.0, min_r2=0.8)
+        pairs = match_rcp_lcp_modes(res_rcp, res_lcp, max_split_nm=15.0, min_r2=0.9)
 
         print(f"\ndesign idx={idx}  (known dense peak|CD|={peak_abs_cd:.4f})")
         print(f"  RCP: {len(res_rcp)} candidates, {len(good_rcp)} good fits (r2>0.8)")
