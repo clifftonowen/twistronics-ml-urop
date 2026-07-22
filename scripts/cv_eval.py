@@ -59,8 +59,14 @@ def cv_once(fit_fn, X, Y, k, seed):
 
 def main(argv: list[str] | None = None) -> dict:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--shard", required=True)
-    p.add_argument("--targets", nargs="+", required=True)
+    p.add_argument("--shard", required=True, help="shard name (used for --targets, and as the report label)")
+    p.add_argument("--targets", nargs="*", default=[], help="load_dataset-compatible targets (cd, both_t, delta_t, ...)")
+    p.add_argument(
+        "--features-file", default=None,
+        help="path to a pre-built (X, Y) .npz (e.g. from build_resonance_features.py) to evaluate "
+        "in addition to/instead of --targets. Must contain 'X' and 'Y' arrays.",
+    )
+    p.add_argument("--features-label", default="resonance_features", help="label for --features-file in the report")
     p.add_argument("--model", choices=("mlp", "gp"), default="gp")
     p.add_argument("--k", type=int, default=5)
     p.add_argument("--repeats", type=int, default=10)
@@ -70,8 +76,16 @@ def main(argv: list[str] | None = None) -> dict:
 
     fit_fn = make_fit(args.model)
     rows = []
+
+    sources: list[tuple[str, np.ndarray, np.ndarray]] = []
     for target in args.targets:
         X, Y, _wl = load_dataset(args.shard, target)
+        sources.append((target, X, Y))
+    if args.features_file:
+        d = np.load(args.features_file)
+        sources.append((args.features_label, d["X"].astype(np.float32), d["Y"].astype(np.float32)))
+
+    for target, X, Y in sources:
         all_model_r2, all_base_r2 = [], []
         for r in range(args.repeats):
             m_r2, b_r2 = cv_once(fit_fn, X, Y, args.k, seed=args.seed + r)
