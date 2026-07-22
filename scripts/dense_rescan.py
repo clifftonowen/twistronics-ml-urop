@@ -57,6 +57,15 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--n-lam", type=int, default=151, help="dense wavelength grid points")
     p.add_argument("--lam-min", type=float, default=600.0)
     p.add_argument("--lam-max", type=float, default=850.0)
+    p.add_argument(
+        "--f-min", type=float, default=None,
+        help="min normalized frequency f=a/lambda. Give WITH --f-max to sample "
+        "directly on the frequency axis (uniform in f, not wavelength) instead "
+        "of --lam-min/--lam-max -- lets a_nm be freely re-picked later to slide "
+        "resonances into 600-850nm at zero extra cost, same convention as "
+        "generate_dataset.py (see README 'Conventions').",
+    )
+    p.add_argument("--f-max", type=float, default=None, help="max normalized frequency; see --f-min")
     p.add_argument("--N", type=int, default=3)
     p.add_argument("--a-nm", type=float, default=500.0)
     p.add_argument("--slab", default="Si3N4")
@@ -67,12 +76,20 @@ def main(argv: list[str] | None = None) -> dict:
 
     backend.set_device(args.device)
 
+    if (args.f_min is None) != (args.f_max is None):
+        p.error("--f-min and --f-max must be given together")
+
     raw = np.load(os.path.join(RAW, f"{args.shard}.npz"))
     X = raw["X"]
     coarse_wl = raw["wavelengths_nm"]
     coarse_cd = raw["CD"]
 
-    dense_wl = np.linspace(args.lam_min, args.lam_max, args.n_lam)
+    if args.f_min is not None:
+        # Uniform in frequency, not wavelength -- see --f-min help.
+        freqs_target = np.linspace(args.f_min, args.f_max, args.n_lam)
+        dense_wl = args.a_nm / freqs_target
+    else:
+        dense_wl = np.linspace(args.lam_min, args.lam_max, args.n_lam)
 
     out_path = args.out or os.path.join(RAW, f"dense_rescan_{args.shard}.npz")
     results: dict = {
@@ -96,19 +113,36 @@ def main(argv: list[str] | None = None) -> dict:
         # Interpolate the EXISTING coarse CD onto the dense grid and compare
         # against the freshly-simulated dense CD -- this isolates "did the
         # coarse grid miss real structure" from "is the design itself noisy".
+        # Only meaningful WITHIN the coarse grid's own range: CubicSpline
+        # extrapolates wildly outside its fitted domain (a wide --f-min/--f-max
+        # dense grid, e.g. for the resonance-fitting pilot, intentionally
+        # extends beyond 600-850nm -- comparing there produced a nonsense
+        # RMS of ~10 on a CD signal bounded in [-1,1] the first time this ran
+        # with a wide grid). Restrict the comparison to the overlap.
+        overlap = (dense_wl >= coarse_wl.min()) & (dense_wl <= coarse_wl.max())
         spline = CubicSpline(coarse_wl, coarse_cd[idx])
-        coarse_interp_on_dense = spline(dense_wl)
-        diff = res.cd - coarse_interp_on_dense
-        rms_mismatch = float(np.sqrt(np.mean(diff ** 2)))
-        dense_std = float(np.std(res.cd))
-        ratio = rms_mismatch / dense_std if dense_std > 1e-12 else float("nan")
+        coarse_interp_on_dense = np.full_like(dense_wl, np.nan)
+        coarse_interp_on_dense[overlap] = spline(dense_wl[overlap])
+        if overlap.sum() >= 3:
+            diff = res.cd[overlap] - coarse_interp_on_dense[overlap]
+            rms_mismatch = float(np.sqrt(np.mean(diff ** 2)))
+            dense_std = float(np.std(res.cd[overlap]))
+            ratio = rms_mismatch / dense_std if dense_std > 1e-12 else float("nan")
+        else:
+            rms_mismatch, dense_std, ratio = float("nan"), float("nan"), float("nan")
         rms_report.append({
             "index": int(idx), "rms_mismatch": rms_mismatch,
             "dense_cd_std": dense_std, "ratio": ratio,
+            "n_overlap": int(overlap.sum()), "n_dense": int(len(dense_wl)),
             "dense_cd_peak_abs": float(np.abs(res.cd).max()),
             "energy_residual_max": float(res.energy_residual().max()),
         })
-        print(f"  RMS(dense - coarse_interp) = {rms_mismatch:.4f}  |  dense CD std = {dense_std:.4f}  |  ratio = {ratio:.3f}")
+        if overlap.sum() >= 3:
+            print(f"  RMS(dense - coarse_interp) = {rms_mismatch:.4f}  |  dense CD std = {dense_std:.4f}  |  "
+                  f"ratio = {ratio:.3f}  ({overlap.sum()}/{len(dense_wl)} points overlap the coarse grid's range)")
+        else:
+            print(f"  aliasing comparison skipped: only {overlap.sum()}/{len(dense_wl)} dense points fall "
+                  f"within the coarse grid's {coarse_wl.min():.0f}-{coarse_wl.max():.0f}nm range")
 
         results[f"design{idx}_dense_cd"] = res.cd
         results[f"design{idx}_dense_T_RCP"] = res.T_RCP
