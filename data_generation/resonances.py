@@ -93,8 +93,20 @@ def detect_candidates(lam: np.ndarray, y: np.ndarray, prominence: float | None =
 
 
 def fit_resonance(lam: np.ndarray, y: np.ndarray, lam0_guess: float,
-                   window_nm: float = 60.0, kind: str = "peak") -> FitResult:
-    """Fit one Fano resonance in a window around lam0_guess."""
+                   window_nm: float = 60.0, kind: str = "peak",
+                   min_gamma: float | None = None) -> FitResult:
+    """Fit one Fano resonance in a window around lam0_guess.
+
+    `min_gamma` floors the fitted linewidth. Without this, `curve_fit` can
+    (and did, on a wide-frequency-grid rescan with 2.5-8nm point spacing --
+    see EXPERIMENTS.md) drive gamma toward its lower bound and produce a
+    needle-thin spike that best-fits a couple of nearby points while being
+    physically meaningless everywhere else -- observed Q up to ~1.5e5, when
+    Q>~1000 is already far beyond what N=3/this grid could resolve or claim.
+    A resonance narrower than ~1-2 grid points is not identifiable from this
+    data, so the fit must not be allowed to claim one. Default (None) derives
+    a floor from the window's own local point spacing.
+    """
     lam = np.asarray(lam, dtype=float)
     y = np.asarray(y, dtype=float)
     mask = np.abs(lam - lam0_guess) <= window_nm / 2.0
@@ -104,6 +116,10 @@ def fit_resonance(lam: np.ndarray, y: np.ndarray, lam0_guess: float,
         return FitResult(lam0_guess, float("nan"), float("nan"), float("nan"),
                           float("nan"), 0.0, False, kind, window_nm, int(lam_w.size))
 
+    if min_gamma is None:
+        local_spacing = float(np.median(np.abs(np.diff(np.sort(lam_w)))))
+        min_gamma = max(2.0 * local_spacing, 1e-3)
+
     # Initial guesses from the local window shape.
     edge_n = max(2, lam_w.size // 6)
     bg0 = float(np.mean(np.concatenate([y_w[:edge_n], y_w[-edge_n:]])))
@@ -111,12 +127,23 @@ def fit_resonance(lam: np.ndarray, y: np.ndarray, lam0_guess: float,
     amp0 = float(y_w[center_idx] - bg0)
     if amp0 == 0:
         amp0 = 1e-3 if kind == "peak" else -1e-3
-    gamma0 = window_nm / 3.0
+    gamma0 = max(window_nm / 3.0, min_gamma * 1.5)
     q0 = 1.0 if kind == "peak" else 0.1
 
+    # bg (baseline transmission) and gamma (linewidth) both need bounds tied
+    # to the actual window/data, not generic fixed constants -- a fixed
+    # bg in [-10, 10] and gamma up to window_nm*5 let curve_fit wander to
+    # physically meaningless solutions (observed: bg=-8.2 when T is bounded
+    # in [0,1], paired with gamma=212nm inside a 42.5nm window -- a
+    # "resonance" 5x wider than the window it was fit in isn't identifiable
+    # from that window; it's an unconstrained broad trend, not a resonance).
+    y_lo, y_hi = float(np.min(y_w)), float(np.max(y_w))
+    y_span = max(y_hi - y_lo, 1e-6)
+    bg_lo, bg_hi = y_lo - 2.0 * y_span, y_hi + 2.0 * y_span
+
     p0 = [lam0_guess, gamma0, q0, amp0, bg0]
-    lo = [lam_w.min(), 1e-3, -1e3, -10 * abs(amp0) - 1e-6, -10.0]
-    hi = [lam_w.max(), window_nm * 5.0, 1e3, 10 * abs(amp0) + 1e-6, 10.0]
+    lo = [lam_w.min(), min_gamma, -1e3, -10 * abs(amp0) - 1e-6, bg_lo]
+    hi = [lam_w.max(), window_nm, 1e3, 10 * abs(amp0) + 1e-6, bg_hi]
 
     try:
         popt, _ = curve_fit(fano_lineshape, lam_w, y_w, p0=p0, bounds=(lo, hi), maxfev=20000)
@@ -128,6 +155,19 @@ def fit_resonance(lam: np.ndarray, y: np.ndarray, lam0_guess: float,
     ss_res = float(np.sum((y_w - y_fit) ** 2))
     ss_tot = float(np.sum((y_w - y_w.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-15 else 0.0
+
+    # Physical-plausibility gate: T_RCP/T_LCP are transmission coefficients,
+    # strictly in [0,1]. A fit whose curve dips outside a small margin of
+    # that range anywhere in the window is not capturing the physics, no
+    # matter its aggregate r2 -- observed case: r2=0.80 (just above the 0.8
+    # quality bar callers use) while the fitted curve went to T=-0.05 where
+    # the true data was 0.53, because a single Fano compromised between a
+    # real resonance on one side of the window and an unrelated rising edge/
+    # shoulder on the other. Aggregate r2 alone doesn't catch this; a direct
+    # physical-range check does.
+    if np.min(y_fit) < -0.1 or np.max(y_fit) > 1.1:
+        return FitResult(lam0_guess, float("nan"), float("nan"), float("nan"),
+                          float("nan"), 0.0, False, kind, window_nm, int(lam_w.size))
 
     lam0_fit, gamma_fit, q_fit, amp_fit, bg_fit = (float(v) for v in popt)
     return FitResult(lam0_fit, gamma_fit, q_fit, amp_fit, bg_fit, r2, True, kind, window_nm, int(lam_w.size))
@@ -159,20 +199,34 @@ def fit_spectrum(lam: np.ndarray, y: np.ndarray, prominence: float | None = None
     """
     candidates = detect_candidates(lam, y, prominence=prominence)
 
+    # Local grid spacing near each candidate -- needed because a grid uniform
+    # in FREQUENCY (not wavelength) has spacing that varies severalfold across
+    # the span (observed: ~2.5nm near the short-wavelength/high-f end vs
+    # ~8nm near the long-wavelength/low-f end of a 555-1000nm wide-f-grid
+    # rescan). A fixed nm floor tuned for one end starves fits at the other:
+    # a 4.0nm floor gave only 2-3 points (below the fit_resonance minimum of
+    # 6) for genuine, narrow (~2-3nm-wide) resonances found at the fine-
+    # spacing end, dropping yield from ~80-100% (narrow uniform-wavelength
+    # grid) to ~30-50% (wide uniform-frequency grid) -- see EXPERIMENTS.md.
+    lam_sorted = np.sort(np.asarray(lam))
+    local_spacing = np.median(np.diff(lam_sorted))  # coarse global proxy is fine here
+
     # Cap each candidate's fitting window by its distance to the nearest OTHER
     # candidate. Two independent resonances closer together than window_nm
     # would otherwise both sit inside one fit's window, and a single-Fano
     # model fit to a two-resonance superposition is not meaningful -- this is
     # exactly the closely-spaced-mode-pair regime CD depends on (CLAUDE.md's
     # "pair of chiral eigenmodes... closely spaced in frequency"), so it must
-    # be handled here rather than assumed away.
+    # be handled here rather than assumed away. The floor ensures at least
+    # ~8 grid points regardless of local grid resolution.
     guesses = [c["lam0_guess"] for c in candidates]
+    min_floor = max(8.0 * local_spacing, 4.0)
     fits = []
     for i, c in enumerate(candidates):
         others = [g for j, g in enumerate(guesses) if j != i]
         if others:
             nearest_gap = min(abs(c["lam0_guess"] - g) for g in others)
-            local_window = min(window_nm, max(2.0 * nearest_gap, 4.0))
+            local_window = min(window_nm, max(2.0 * nearest_gap, min_floor))
         else:
             local_window = window_nm
         fits.append(fit_resonance(lam, y, c["lam0_guess"], window_nm=local_window, kind=c["kind"]))
@@ -236,8 +290,18 @@ def _predicted_peak_abs_cd(rcp: FitResult, lcp: FitResult, n_eval: int = 200) ->
 
 
 def match_rcp_lcp_modes(res_rcp: list[FitResult], res_lcp: list[FitResult],
-                         max_split_nm: float = 15.0, min_r2: float = 0.5) -> list[ModePair]:
+                         max_split_nm: float = 15.0, min_r2: float = 0.9) -> list[ModePair]:
     """Optimal RCP/LCP mode pairing, weighted by predicted chirality.
+
+    Default min_r2=0.9 (raised from an initial 0.5/0.8 -- see EXPERIMENTS.md):
+    borderline r2 in [0.8, 0.9) fits were found to admit compromise fits (a
+    single Fano straddling a real resonance and an unrelated rising edge, or
+    a large-q/tiny-amp/large-gamma near-degenerate solution) that pass the
+    physical-plausibility bounds in `fit_resonance` yet still distort
+    downstream CD predictions (observed: a saturated predicted|CD|=1.000 from
+    an r2=0.84 fit). 0.9 cleanly excludes these in practice while the
+    genuinely well-fit resonances validated in EXPERIMENTS.md Sec 6d score
+    r2>0.98-0.999.
 
     Only fits with r2 >= min_r2 are eligible, and a pair is only feasible if
     its splitting is within max_split_nm (CLAUDE.md's CD recipe requires
