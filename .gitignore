@@ -24,3 +24,6 @@ models/artifacts/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+# Meeting Artifacts
+docs
