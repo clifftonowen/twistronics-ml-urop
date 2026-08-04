@@ -45,12 +45,21 @@ BOUNDS: dict[str, tuple[float, float]] = {
 
 # High-CD focused box (EXPERIMENTS.md Sec 5): mined from v0_n120 by rank
 # correlation of each parameter with peak |CD| -- thickness (+0.43) and twist
-# (+0.37) correlate most strongly, radius weakly (+0.22), gap weakly and
-# inversely (-0.21). Top-15 CD designs in v0 clustered at theta 15-30
-# (med 25), t 0.25-0.40 (med 0.31), gap 0-0.25 (med 0.18), r 0.15-0.37
-# (med 0.22). Narrowing BOUNDS to this box concentrates sampling density in
-# the strong-CD region instead of spending most of the LHS budget on
-# near-achiral (weak-CD) structures, which is what v0's uniform box did.
+# (+0.37) appeared to correlate most strongly, radius weakly (+0.22), gap
+# weakly and inversely (-0.21). Top-15 CD designs in v0 clustered at theta
+# 15-30 (med 25), t 0.25-0.40 (med 0.31), gap 0-0.25 (med 0.18), r 0.15-0.37
+# (med 0.22).
+#
+# CAVEAT, established later and important: those correlations were computed on
+# labels from the 26-point/600-850nm grid, which was subsequently shown to
+# alias the CD spectrum (EXPERIMENTS.md Sec 6c). Recomputed against the 20
+# designs that now have properly resolved dense scans, the twist correlation
+# does not survive -- Spearman rho(theta, peak|CD|) = +0.05, p = 0.84, versus
+# the +0.37 quoted above, and the single strongest design in that set sits at
+# theta = 20.4. Thickness (+0.32) and gap (+0.30) are nominally positive but
+# also not significant at n = 20. Treat this box as a historical artifact that
+# did raise measured CD in practice (median peak|CD| 0.078 -> 0.191), not as
+# evidence about where CD actually lives.
 HIGH_CD_BOUNDS: dict[str, tuple[float, float]] = {
     "theta_deg": (15.0, 30.0),
     "thickness": (0.25, 0.40),
@@ -58,10 +67,30 @@ HIGH_CD_BOUNDS: dict[str, tuple[float, float]] = {
     "radius": (0.15, 0.35),
 }
 
+# Box for the peak-centred narrow-window campaign. Narrowed around the six
+# designs with theta >= 25 that have resolved dense scans and peak|CD| >= 0.24
+# (spans: t 0.296-0.398, gap 0.073-0.235, r 0.184-0.329), padded slightly so
+# the seeds are not on the boundary.
+#
+# The theta 25-30 restriction is a LABEL-QUALITY and DENSITY choice, not a
+# CD-maximizing one -- see the caveat on HIGH_CD_BOUNDS above. At a fixed
+# truncation N_m = 3, a larger twist gives a smaller moire supercell and so
+# needs fewer harmonics to converge, making labels in this corner the most
+# trustworthy available. Narrowing all four dimensions cuts the box volume to
+# ~21% of the high_cd box, roughly a 4.8x gain in sampling density at equal n,
+# which is the binding constraint on learnability.
+PEAK_BOUNDS: dict[str, tuple[float, float]] = {
+    "theta_deg": (25.0, 30.0),
+    "thickness": (0.27, 0.40),
+    "gap": (0.05, 0.25),
+    "radius": (0.16, 0.34),
+}
+
 # Named presets selectable via generate_dataset.py --box.
 BOX_PRESETS: dict[str, dict[str, tuple[float, float]]] = {
     "full": BOUNDS,
     "high_cd": HIGH_CD_BOUNDS,
+    "peak_box": PEAK_BOUNDS,
 }
 
 PARAM_NAMES = list(BOUNDS.keys())
@@ -99,6 +128,50 @@ def sample_params(
     scaled = qmc.scale(unit, lows, highs)  # (n, d) in [low, high)
 
     return [DesignParams(**dict(zip(names, row))) for row in scaled]
+
+
+def sample_perturbed(
+    seeds: list[DesignParams],
+    n: int,
+    bounds: dict[str, tuple[float, float]] | None = None,
+    sigma_frac: float = 0.15,
+    seed: int | None = None,
+) -> list[DesignParams]:
+    """Draw `n` designs by jittering around known-good `seeds`.
+
+    Complements `sample_params`: LHS spreads a fixed budget evenly, which is
+    what you want for coverage, while this concentrates it near structures
+    already measured to have strong CD -- the region an inverse-design search
+    will actually operate in, and where the response is most worth resolving.
+
+    Per-dimension sigma is `sigma_frac` of that dimension's box WIDTH rather
+    than of the value, so the jitter is comparable across parameters that live
+    on different scales (theta in degrees, the rest in units of a).
+
+    Seeds are cycled round-robin, not sampled at random, so a small `n` cannot
+    happen to cluster on one seed and leave the others unexplored.
+
+    Draws are clipped to `bounds`. Clipping (rather than rejecting) means seeds
+    near a face pile a little probability mass onto it; that is deliberate --
+    the box faces are chosen conventions, not physical walls, and rejection
+    would silently thin the sample near exactly the good designs this is meant
+    to concentrate on.
+    """
+    if not seeds:
+        raise ValueError("need at least one seed design")
+    bounds = bounds or PEAK_BOUNDS
+    names = list(bounds.keys())
+    lows = np.array([bounds[k][0] for k in names])
+    highs = np.array([bounds[k][1] for k in names])
+    sigma = sigma_frac * (highs - lows)
+
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(n):
+        base = np.array([getattr(seeds[i % len(seeds)], k) for k in names], dtype=float)
+        draw = np.clip(base + rng.normal(0.0, sigma), lows, highs)
+        out.append(DesignParams(**dict(zip(names, draw))))
+    return out
 
 
 def params_to_matrix(params: list[DesignParams]) -> np.ndarray:

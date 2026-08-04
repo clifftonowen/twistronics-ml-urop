@@ -41,6 +41,10 @@ DEFAULT_RAW = os.path.join(ROOT, "datasets", "raw")
 ARTIFACTS = os.path.join(os.path.dirname(__file__), "artifacts")
 
 TARGETS = ("cd", "t_rcp", "t_lcp", "both_t", "mean_t", "delta_t")
+# Targets defined only on peak-centred shards (scripts/peak_campaign.py), whose
+# spectra live on the shared relative axis u = f/f_peak - 1 rather than on a
+# common wavelength grid.
+PEAK_TARGETS = ("rel_cd", "peak_cd", "f_peak", "window_both_t", "window_delta_t")
 
 
 def set_seed(seed: int) -> None:
@@ -48,8 +52,44 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def load_peak_dataset(shard: str, target: str, proc_dir=DEFAULT_PROC):
+    """X and Y for a peak-centred shard; the spectral axis returned is u, not nm.
+
+    These shards carry each design's CD on a window centred on its OWN peak, so
+    the spectrum and the peak's location are separate quantities:
+
+      rel_cd         the aligned CD lineshape on the shared axis u
+      f_peak         where that lineshape sits -- with non-dispersive materials
+                     this is the lattice constant to fabricate (a = f_peak *
+                     lambda_target), not a nuisance parameter
+      peak_cd        scalar |CD| at the peak; the device metric, and the
+                     easiest rung of the target ladder
+      window_both_t  transmission on the same window -- the control. It was
+                     learnable on every previous representation, so if it fails
+                     here the pipeline is broken rather than CD being hard.
+      window_delta_t T_RCP - T_LCP, regressed directly rather than as a ratio
+    """
+    proc = np.load(os.path.join(proc_dir, f"{shard}.npz"))
+    X = proc["X"].astype(np.float32)
+    if target == "rel_cd":
+        Y = proc["Y"]
+    elif target == "peak_cd":
+        Y = proc["peak_abs_cd"][:, None]
+    elif target == "f_peak":
+        Y = proc["f_peak"][:, None]
+    elif target == "window_both_t":
+        Y = np.concatenate([proc["T_RCP"], proc["T_LCP"]], axis=1)
+    elif target == "window_delta_t":
+        Y = proc["T_RCP"] - proc["T_LCP"]
+    else:
+        raise ValueError(f"unknown peak-shard target {target!r}; choose from {PEAK_TARGETS}")
+    return X, Y.astype(np.float32), proc["u"]
+
+
 def load_dataset(shard: str, target: str, proc_dir=DEFAULT_PROC, raw_dir=DEFAULT_RAW):
     """X (standardized inputs) and Y (chosen target), sharing design order."""
+    if target in PEAK_TARGETS:
+        return load_peak_dataset(shard, target, proc_dir)
     proc = np.load(os.path.join(proc_dir, f"{shard}.npz"))
     raw = np.load(os.path.join(raw_dir, f"{shard}.npz"))
     X = proc["X"].astype(np.float32)          # (n, 4) standardized
@@ -251,7 +291,7 @@ def make_plots(out_dir, tag, history, lc, pred_te, Yte, wl):
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--shard", default="v0_n120")
-    p.add_argument("--target", choices=TARGETS, default="both_t")
+    p.add_argument("--target", choices=TARGETS + PEAK_TARGETS, default="both_t")
     p.add_argument("--model", choices=("mlp", "gp"), default="gp")
     p.add_argument("--hidden", type=int, nargs="+", default=[64, 64])
     p.add_argument("--dropout", type=float, default=0.0)
