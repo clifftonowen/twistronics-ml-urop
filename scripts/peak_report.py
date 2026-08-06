@@ -81,7 +81,44 @@ def load_shards(shards: list[str]) -> dict:
         raise SystemExit("no accepted designs in any given shard")
     out = {k: np.concatenate(v) for k, v in acc.items()}
     out["u"] = u
-    return out
+    return _dedupe(out, shards)
+
+
+def _dedupe(D: dict, shards: list[str]) -> dict:
+    """Collapse repeated designs, keeping the occurrence from the LAST shard listed.
+
+    A design that gets re-measured (say after an edge re-centre) leaves its
+    original row in the shard it came from. Merging both without this would
+    silently count that design twice and train on its stale label as well as its
+    corrected one. Last-listed wins, so put the newer shard later on the command
+    line -- the printed drop count makes the resolution visible rather than
+    implicit.
+
+    Identity is the parameter vector: two rows with identical (theta, t, gap, r)
+    are the same structure by definition, since the solver is deterministic given
+    the geometry.
+    """
+    X = D["X"]
+    keep_by_key: dict[tuple, int] = {}
+    for i in range(X.shape[0]):
+        keep_by_key[tuple(np.round(X[i], 9))] = i  # later i overwrites earlier
+    keep = np.array(sorted(keep_by_key.values()))
+    n_dropped = X.shape[0] - keep.size
+    if n_dropped:
+        print(f"  dedupe: dropped {n_dropped} repeated design(s), keeping the "
+              f"occurrence from the later shard (order given: {', '.join(shards)})")
+    if keep.size == X.shape[0]:
+        return D
+    # `u` is the shared spectral axis, not a per-design array -- it must never be
+    # row-filtered. Excluding it by name rather than by shape, because a shape
+    # test would silently mangle it whenever the design count happened to equal
+    # the window's point count (41 here, an entirely reachable n).
+    n_designs = X.shape[0]
+    return {
+        k: (v[keep] if k != "u" and isinstance(v, np.ndarray)
+            and v.ndim >= 1 and v.shape[0] == n_designs else v)
+        for k, v in D.items()
+    }
 
 
 def report_centring(D: dict, half_width: float) -> None:
