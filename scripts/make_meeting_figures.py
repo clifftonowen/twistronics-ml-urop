@@ -635,10 +635,243 @@ def fig11_timeline():
     return save(fig, "fig11_timeline_fork.png")
 
 
+# --------------------------------------------------------------------------- #
+# Stage C -- the peak-centred narrow-window representation (EXPERIMENTS Sec 6h/6i)
+#
+# These read from whatever peak shards are on disk, so re-running after another
+# campaign shard lands refreshes every number without editing this file.
+# --------------------------------------------------------------------------- #
+
+PEAK_SHARDS = ["peak_known8", "peak_pilot25", "peak_batch2a", "peak_batch2b",
+               "peak_redo1"]  # redo LAST: dedupe keeps the last-listed occurrence
+
+
+def _peak_merged():
+    """Merged accepted designs across every peak shard present on disk."""
+    from scripts.peak_report import load_shards
+    have = [s for s in PEAK_SHARDS
+            if os.path.exists(os.path.join(RAW, f"{s}.npz"))]
+    return load_shards(have), have
+
+
+def fig12_window_concept():
+    """Why the window is peak-centred: peaks are spread across the whole band."""
+    D, _ = _peak_merged()
+    fp, u = D["f_peak"], D["u"]
+    a_nm = 500.0
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 4.6))
+
+    counts, _, _ = ax1.hist(a_nm / fp, bins=14, color=BLUE, alpha=0.8, edgecolor="white")
+    # Headroom so the annotation never collides with the tallest bar.
+    ax1.set_ylim(0, counts.max() * 1.32)
+    ax1.set(xlabel="wavelength of each design's CD peak (nm)", ylabel="designs",
+            title=f"Peaks are spread over ~{a_nm/fp.max():.0f}–{a_nm/fp.min():.0f} nm")
+    ax1.text(0.5, 0.94, "no single fixed window can catch them all",
+             transform=ax1.transAxes, ha="center", va="top", fontsize=11,
+             color=VERMILLION,
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                       edgecolor="none", alpha=0.85))
+
+    # Every design's CD on the shared relative axis: aligned by construction.
+    for cd in D["window_cd"]:
+        ax2.plot(100 * u, cd, color=BLUE, alpha=0.28, lw=1.0)
+    ax2.axvline(0, color=VERMILLION, lw=1.6, ls="--")
+    ax2.text(0.4, 0.96, "u = 0: each design's own peak", transform=ax2.transAxes,
+             fontsize=10.5, color=VERMILLION, va="top")
+    ax2.set(xlabel=r"relative frequency  $u = \tilde{f}/\tilde{f}_{\rm peak} - 1$  (%)",
+            ylabel="CD", title=f"…so each is measured on its own window (n={len(fp)})")
+    ax2.axhline(0, color="black", lw=0.8, alpha=0.5)
+
+    fig.suptitle("Stage C: a narrow window centred on each design's own CD peak", fontsize=14)
+    fig.tight_layout()
+    return save(fig, "fig12_window_concept.png")
+
+
+def fig13_dealiasing_recovery():
+    """What the coarse pass reports vs what the resolved window measures."""
+    D, _ = _peak_merged()
+    loc, win = D["locate_peak_abs_cd"], D["window_peak_abs_cd"]
+    ok = np.isfinite(loc) & (loc > 1e-9)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 4.6))
+
+    lim = [0, max(win.max(), loc[ok].max()) * 1.08]
+    ax1.plot(lim, lim, color=GREY, ls="--", lw=1.4, label="agreement")
+    ax1.scatter(loc[ok], win[ok], s=46, color=BLUE, alpha=0.85, edgecolor="white", zorder=3)
+    ax1.set(xlim=lim, ylim=lim, xlabel="peak |CD| from the coarse locate pass",
+            ylabel="peak |CD| from the resolved window",
+            title="Points above the line: the coarse grid under-read")
+    ax1.legend(loc="lower right")
+
+    ratio = win[ok] / loc[ok]
+    ax2.hist(ratio, bins=14, color=GREEN, alpha=0.85, edgecolor="white")
+    ax2.axvline(1.0, color=GREY, ls="--", lw=1.4)
+    ax2.axvline(np.median(ratio), color=VERMILLION, lw=2.0,
+                label=f"median {np.median(ratio):.2f}")
+    ax2.set(xlabel="resolved / coarse peak |CD|", ylabel="designs",
+            title=f"Under-read in {100*(ratio > 1.05).mean():.0f}% of designs "
+                  f"(max {ratio.max():.2f}×)")
+    ax2.legend()
+
+    fig.suptitle("De-aliasing: the resolved window recovers CD the coarse grid missed",
+                 fontsize=14)
+    fig.tight_layout()
+    return save(fig, "fig13_dealiasing_recovery.png")
+
+
+def _two_stage_rows(target: str):
+    """Paired CV of flat / conditioned / baseline on the merged peak set."""
+    import warnings
+    from models.forward_surrogate import make_fit
+    from models.two_stage_surrogate import cv_two_stage
+
+    D, _ = _peak_merged()
+    X = D["X"].astype(float)
+    m, s = X.mean(0), X.std(0)
+    s[s < 1e-12] = 1.0
+    Xn = ((X - m) / s).astype(np.float32)
+    Y = (D["window_cd"] if target == "rel_cd"
+         else np.concatenate([D["window_T_RCP"], D["window_T_LCP"]], axis=1)).astype(np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return cv_two_stage(Xn, D["f_peak"].astype(np.float32), Y, make_fit("gp"), 5, 10, 0), len(X)
+
+
+def fig14_cd_conditioned():
+    """The headline: CD is learnable once conditioned on where the peak sits."""
+    from scipy import stats
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8))
+    for ax, (target, label) in zip(axes, [("rel_cd", "CD lineshape"),
+                                          ("both_t", "transmission (control)")]):
+        r, n = _two_stage_rows(target)
+        names = ["mean-predictor\nbaseline", "flat\nX → lineshape",
+                 "conditioned on\nmeasured $\\tilde{f}_{peak}$"]
+        keys = ["baseline", "flat", "oracle"]
+        means = [r[k].mean() for k in keys]
+        sds = [r[k].std() for k in keys]
+        colours = [GREY, ORANGE, GREEN]
+
+        bars = ax.bar(names, means, yerr=sds, capsize=5, color=colours,
+                      alpha=0.9, edgecolor="white")
+        ax.axhline(0, color="black", lw=1.0)
+        for b, mval in zip(bars, means):
+            ax.text(b.get_x() + b.get_width() / 2,
+                    mval + (0.03 if mval >= 0 else -0.09),
+                    f"{mval:+.3f}", ha="center", fontsize=11, fontweight="bold")
+        d = r["oracle"] - r["baseline"]
+        p = stats.ttest_1samp(d, 0)[1]
+        ax.set_title(f"{label}  (n={n})\nconditioned vs baseline: "
+                     f"{d.mean():+.3f}, paired p = {p:.1e}", fontsize=12.5)
+        ax.set_ylabel("CV $R^2$  (50 paired folds)")
+
+    fig.suptitle("Knowing where the resonance sits is what makes CD learnable",
+                 fontsize=14)
+    fig.tight_layout()
+    return save(fig, "fig14_cd_conditioned.png")
+
+
+def fig15_deployable_pipeline():
+    """The payoff: f_peak is measured cheaply, not predicted."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 4.4),
+                                   gridspec_kw={"width_ratios": [1.45, 1]})
+    ax1.set_xlim(0, 10); ax1.set_ylim(0, 3.2); ax1.axis("off"); ax1.grid(False)
+
+    box(ax1, 0.2, 1.15, 1.9, 1.0, "design\n(θ, t, gap, r)", face=GREY + "1A", edge=GREY)
+    box(ax1, 2.6, 1.15, 2.5, 1.0, "locate pass\nN=2, 81 pts\n~2.5 min",
+        face=BLUE + "1A", edge=BLUE, fontsize=10.5)
+    box(ax1, 5.6, 1.15, 2.1, 1.0, "surrogate\n(X, $\\tilde{f}_{peak}$)\ninstant",
+        face=GREEN + "1A", edge=GREEN, fontsize=10.5)
+    box(ax1, 8.1, 1.15, 1.7, 1.0, "resolved\nlineshape", face=GREEN + "1A", edge=GREEN,
+        fontsize=10.5)
+    for a, b in [((2.1, 1.65), (2.6, 1.65)), ((5.1, 1.65), (5.6, 1.65)),
+                 ((7.7, 1.65), (8.1, 1.65))]:
+        arrow(ax1, a, b)
+    box(ax1, 2.6, 0.05, 5.1, 0.8, "replaces the N=3 window pass  (~23 min)",
+        face=VERMILLION + "1A", edge=VERMILLION, fontsize=10.5)
+    ax1.text(5.0, 2.55, "Deployable pipeline", ha="center", fontsize=13.5, fontweight="bold")
+
+    stages = ["full two-pass\nmeasurement", "locate + surrogate"]
+    mins = [2.5 + 23.0, 2.5]
+    bars = ax2.bar(stages, mins, color=[GREY, GREEN], alpha=0.9, edgecolor="white", width=0.55)
+    for b, v in zip(bars, mins):
+        ax2.text(b.get_x() + b.get_width() / 2, v + 0.6, f"{v:.1f} min",
+                 ha="center", fontsize=12, fontweight="bold")
+    ax2.set(ylabel="minutes per design", ylim=(0, 30),
+            title=f"{mins[0]/mins[1]:.0f}× cheaper per design")
+
+    fig.suptitle("$\\tilde{f}_{peak}$ is measured in ~2.5 min, not predicted — "
+                 "so the conditioned model is deployable", fontsize=13.5)
+    fig.tight_layout()
+    return save(fig, "fig15_deployable_pipeline.png")
+
+
+def fig16_learning_curve():
+    """Is CD's accuracy actually improving with n, or has it plateaued?
+
+    The decision figure: every earlier campaign produced a FLAT learning curve
+    at baseline, which is what "more data will not help" looks like. This plots
+    the same quantity for the conditioned model.
+    """
+    import warnings
+    from models.forward_surrogate import make_fit
+    from models.two_stage_surrogate import cv_two_stage
+
+    D, _ = _peak_merged()
+    X = D["X"].astype(float)
+    m, s = X.mean(0), X.std(0)
+    s[s < 1e-12] = 1.0
+    Xn = ((X - m) / s).astype(np.float32)
+    fp = D["f_peak"].astype(np.float32)
+    Y = D["window_cd"].astype(np.float32)
+    n_all = len(fp)
+
+    # Sizes spaced so no two points are near-duplicate subsamples of the same
+    # pool: at n_all-3 vs n_all the two draws share almost every design, so any
+    # difference between them is noise that reads as a real wobble on the plot.
+    sizes = [x for x in (20, 30, 40, 50, 60) if x <= n_all - 6]
+    sizes.append(n_all)
+    rng = np.random.default_rng(0)
+
+    cond_mu, cond_sd, base_mu = [], [], []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for n in sizes:
+            reps, bases = [], []
+            n_draws = 1 if n == n_all else 5   # the full set has only one draw
+            for rep in range(n_draws):
+                idx = rng.choice(n_all, n, replace=False) if n < n_all else np.arange(n_all)
+                r = cv_two_stage(Xn[idx], fp[idx], Y[idx], make_fit("gp"), 5, 5, rep)
+                reps.append(r["oracle"].mean())
+                bases.append(r["baseline"].mean())
+            cond_mu.append(np.mean(reps)); cond_sd.append(np.std(reps))
+            base_mu.append(np.mean(bases))
+
+    fig, ax = plt.subplots(figsize=(8.2, 5.0))
+    ax.errorbar(sizes, cond_mu, yerr=cond_sd, marker="o", color=GREEN, capsize=4,
+                label="CD conditioned on measured $\\tilde{f}_{peak}$")
+    ax.plot(sizes, base_mu, marker="s", ls="--", color=GREY, label="mean-predictor baseline")
+    ax.axhline(0, color="black", lw=0.9)
+    ax.set(xlabel="training-set size (designs)", ylabel="CV $R^2$",
+           title=f"CD accuracy vs data: {cond_mu[0]:+.2f} at n={sizes[0]} "
+                 f"→ {cond_mu[-1]:+.2f} at n={sizes[-1]}")
+    ax.legend(loc="upper left")
+    ax.text(0.98, 0.04,
+            "every earlier representation gave a FLAT\ncurve pinned at baseline",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=10,
+            color=VERMILLION)
+    fig.tight_layout()
+    return save(fig, "fig16_cd_learning_curve.png")
+
+
 FIGURES = {
     1: fig01_pipeline, 2: fig02_geometry, 3: fig03_convergence, 4: fig04_gpu,
     5: fig05_boxes, 6: fig06_cv, 7: fig07_learning_curves, 8: fig08_aliasing,
     9: fig09_aliasing_stats, 10: fig10_fano, 11: fig11_timeline,
+    12: fig12_window_concept, 13: fig13_dealiasing_recovery,
+    14: fig14_cd_conditioned, 15: fig15_deployable_pipeline,
+    16: fig16_learning_curve,
 }
 
 
