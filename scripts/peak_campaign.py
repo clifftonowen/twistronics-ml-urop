@@ -65,6 +65,7 @@ from data_generation.peak_window import (
     DEFAULT_HALF_WIDTH,
     DEFAULT_WINDOW_PTS,
     locate_peak,
+    peak_at_edge,
     relative_axis,
     resolvable_q_range,
 )
@@ -107,8 +108,38 @@ def load_known_peaks(a_nm: float) -> dict[int, float]:
     return known
 
 
+def load_peak_shard_designs(shard: str, rows: list[int]) -> tuple[list[DesignParams], list[float]]:
+    """Params + f_peak for accepted rows of an existing PEAK-campaign shard.
+
+    Distinct from `load_known_peaks`, which sources f_peak from the dense-scan
+    shards: designs first measured by the campaign itself have no dense scan, so
+    re-measuring one (e.g. after the edge re-centre landed) has to read its
+    parameters and centre back out of the campaign shard.
+
+    `rows` index the ACCEPTED designs (the `X`/`f_peak` arrays), not the
+    attempted ones -- the same convention `peak_report` and the processed shard
+    use. Note the raw shard also carries `X_all`/`f_peak_all` over every
+    attempted design; mixing the two indexings silently misaligns designs.
+    """
+    d = np.load(os.path.join(RAW, f"{shard}.npz"))
+    if "X" not in d.files:
+        raise SystemExit(f"{shard} has no accepted designs to redo")
+    n = d["X"].shape[0]
+    bad = [i for i in rows if not 0 <= i < n]
+    if bad:
+        raise SystemExit(f"{shard} has {n} accepted designs; row(s) {bad} out of range")
+    designs = [DesignParams(**dict(zip(PARAM_NAMES, d["X"][i]))) for i in rows]
+    return designs, [float(d["f_peak"][i]) for i in rows]
+
+
 def build_designs(args) -> tuple[list[DesignParams], list[str], list[float | None]]:
     """Return (designs, origin label per design, known f_peak per design)."""
+    if args.redo_shard:
+        if not args.redo_rows:
+            raise SystemExit("--redo-shard requires --redo-rows")
+        designs, f_known = load_peak_shard_designs(args.redo_shard, args.redo_rows)
+        return designs, [f"redo:{args.redo_shard}:{i}" for i in args.redo_rows], f_known
+
     if args.reprocess_indices:
         known = load_known_peaks(args.a_nm)
         missing = [i for i in args.reprocess_indices if i not in known]
@@ -140,6 +171,19 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
     p.add_argument("--reprocess-indices", type=int, nargs="*", default=None,
                    help="skip sampling and pass 1: run pass 2 on these existing designs, "
                         "whose f_peak comes from their N=3 dense scan")
+    p.add_argument("--redo-shard", default=None,
+                   help="re-measure designs from an existing PEAK shard (params and "
+                        "starting f_peak are read from it). Use with --redo-rows. For "
+                        "designs the campaign itself produced, which have no dense scan "
+                        "and so cannot go through --reprocess-indices.")
+    p.add_argument("--redo-rows", type=int, nargs="*", default=None,
+                   help="ACCEPTED-row indices into --redo-shard (not attempted-row)")
+    p.add_argument("--edge-margin", type=int, default=2,
+                   help="a window peak within this many grid points of either end "
+                        "triggers a re-centre; see peak_window.peak_at_edge")
+    p.add_argument("--max-recentre", type=int, default=1,
+                   help="max re-centre retries per design. A cap is required, not "
+                        "optional: two lobes straddling a window can oscillate.")
     p.add_argument("--min-peak-cd", type=float, default=0.20,
                    help="screen: reject designs whose pass-1 peak|CD| is below this. "
                         "Note 0.1 is effectively non-binding here -- all 20 designs with "
@@ -222,11 +266,36 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
 
         rec["accepted"] = bool(accepted)
         if accepted:
-            win = window_pass(
-                design, rec["f_peak"], a_nm=args.a_nm, half_width=args.half_width,
-                n_pts=args.window_pts, N=args.window_N, **sim_kw,
-            )
+            f_centre = rec["f_peak"]
+            f_initial = f_centre
+            n_recentres = 0
+            while True:
+                win = window_pass(
+                    design, f_centre, a_nm=args.a_nm, half_width=args.half_width,
+                    n_pts=args.window_pts, N=args.window_N, **sim_kw,
+                )
+                if not peak_at_edge(win.spectrum.cd, args.edge_margin):
+                    break
+                if n_recentres >= args.max_recentre:
+                    # Out of retries with the peak still against an edge. Keep
+                    # the measurement but mark it: this label may be reading a
+                    # feature whose own peak lies outside the window.
+                    break
+                # Re-centre on the peak the WINDOW found. Its grid is ~4x finer
+                # than the locate pass's, so this is strictly better information
+                # than the centre we started from.
+                f_centre = float(win.spectrum.freqs[int(np.argmax(np.abs(win.spectrum.cd)))])
+                n_recentres += 1
+                tqdm.write(
+                    f"  design {i}: peak at window edge -> re-centring "
+                    f"{f_initial:.4f} -> {f_centre:.4f} (attempt {n_recentres})"
+                )
+
             rec.update(
+                f_peak=f_centre,           # final centre; f_peak_initial keeps the first
+                f_peak_initial=f_initial,
+                n_recentres=n_recentres,
+                still_at_edge=bool(peak_at_edge(win.spectrum.cd, args.edge_margin)),
                 window_cd=win.spectrum.cd,
                 window_T_RCP=win.spectrum.T_RCP, window_T_LCP=win.spectrum.T_LCP,
                 window_R_RCP=win.spectrum.R_RCP, window_R_LCP=win.spectrum.R_LCP,
@@ -250,6 +319,11 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
         res = np.array([float(r["window_energy_residual"].max()) for r in records if r["accepted"]])
         print(f"  window peak|CD|: median {np.median(pk):.3f}  min {pk.min():.3f}  max {pk.max():.3f}")
         print(f"  max energy residual {res.max():.2e}  (>1e-3 => check truncation)")
+        nrc = sum(r.get("n_recentres", 0) for r in records if r["accepted"])
+        stuck = sum(bool(r.get("still_at_edge")) for r in records if r["accepted"])
+        print(f"  re-centred {nrc} time(s); {stuck} design(s) still at the window edge"
+              + ("  <-- their labels may read a feature peaking outside the window"
+                 if stuck else ""))
     for k, v in paths.items():
         print(f"  {k:10s}: {v}")
     return paths
@@ -291,6 +365,12 @@ def _write(records: list[dict], args, qr, complete: bool, elapsed: float) -> dic
         "fwhm_grid_pts": _col(records, "fwhm_grid_pts"),
         "u": u,
     }
+    if acc:
+        # Re-centre provenance, one entry per ACCEPTED design (only accepted
+        # designs reach pass 2 at all).
+        raw["f_peak_initial"] = _col(records, "f_peak_initial", mask=True)
+        raw["n_recentres"] = _col(records, "n_recentres", mask=True, default=0)
+        raw["still_at_edge"] = _col(records, "still_at_edge", mask=True, default=0)
     if has_locate:
         raw["locate_freqs"] = np.linspace(args.f_min, args.f_max, args.locate_pts)
         for key in ("locate_cd", "locate_T_RCP", "locate_T_LCP", "locate_energy_residual"):
@@ -356,6 +436,10 @@ def _write(records: list[dict], args, qr, complete: bool, elapsed: float) -> dic
         "seed_shard": args.seeds_from,
         "seed_indices": args.seed_indices,
         "reprocess_indices": args.reprocess_indices,
+        "redo_shard": args.redo_shard,
+        "redo_rows": args.redo_rows,
+        "edge_margin": args.edge_margin,
+        "max_recentre": args.max_recentre,
         "min_peak_cd": args.min_peak_cd,
         "locate": {"N_m": args.locate_N, "f_min": args.f_min, "f_max": args.f_max,
                    "n_pts": args.locate_pts},
