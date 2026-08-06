@@ -309,6 +309,31 @@ class QRange:
         return "unresolved"
 
 
+def peak_at_edge(cd: np.ndarray, edge_margin: int = 2) -> bool:
+    """Does this window's strongest feature sit against one of its edges?
+
+    The campaign's one SILENT failure mode. A window is centred on where the
+    cheap locate pass put the peak; if the resolved peak turns out to be at the
+    window boundary, the true peak may lie outside it entirely -- and the shard
+    would record whatever the best in-window value happened to be, with nothing
+    marking it as suspect. Every other defect announces itself; this one does
+    not, so it is checked explicitly and the design re-measured on a window
+    re-centred on the better estimate.
+
+    `edge_margin` counts grid points from either end. The default of 2 means a
+    peak is acceptable only if it is a bracketed interior maximum with at least
+    one further point of margin. The choice is not a tuned knob: across the 23
+    pilot designs one peak sits at index 0 while the next-closest is 10 points
+    from either end, so margins of 1, 2 and 3 all select exactly that design.
+    2 matches the >=0.95 criterion `scripts/peak_report.py` reports.
+    """
+    cd = np.asarray(cd)
+    if cd.size < 2 * edge_margin + 1:
+        return True  # too short to have an interior at all
+    i = int(np.argmax(np.abs(cd)))
+    return i < edge_margin or i >= cd.size - edge_margin
+
+
 def peak_recovery(q: float, half_width: float = DEFAULT_HALF_WIDTH,
                   n_pts: int = DEFAULT_WINDOW_PTS, n_phases: int = 41) -> float:
     """Worst-case fraction of a resonance's peak height this window recovers.
