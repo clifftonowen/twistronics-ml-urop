@@ -86,11 +86,26 @@ PEAK_BOUNDS: dict[str, tuple[float, float]] = {
     "radius": (0.16, 0.34),
 }
 
+# Gap near a vacuum quarter-wave (supervisor feedback, 2026-09-18): the gap
+# layer is vacuum (simulate_spectra.py builds it with eps=None), so d = lambda/4
+# means d/a = 1/(4*f_tilde). Across the locate band f_tilde in [0.60, 0.92],
+# that is d/a in [0.27, 0.42] -- all 71 PEAK_BOUNDS designs sit at d/a <= 0.235,
+# so this box is deliberately outside anything measured so far. theta/t/r are
+# left identical to PEAK_BOUNDS so gap is the only variable that changes
+# relative to the existing n=71 set.
+QUARTER_WAVE_BOUNDS: dict[str, tuple[float, float]] = {
+    "theta_deg": (25.0, 30.0),
+    "thickness": (0.27, 0.40),
+    "gap": (0.27, 0.42),
+    "radius": (0.16, 0.34),
+}
+
 # Named presets selectable via generate_dataset.py --box.
 BOX_PRESETS: dict[str, dict[str, tuple[float, float]]] = {
     "full": BOUNDS,
     "high_cd": HIGH_CD_BOUNDS,
     "peak_box": PEAK_BOUNDS,
+    "quarter_wave": QUARTER_WAVE_BOUNDS,
 }
 
 PARAM_NAMES = list(BOUNDS.keys())
