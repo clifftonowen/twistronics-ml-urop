@@ -149,6 +149,16 @@ def build_designs(args) -> tuple[list[DesignParams], list[str], list[float | Non
         return designs, [f"reprocess:{i}" for i in args.reprocess_indices], \
             [known[i] for i in args.reprocess_indices]
 
+    if args.sweep_base:
+        if not args.sweep_gaps:
+            raise SystemExit("--sweep-base requires --sweep-gaps")
+        designs, origins = [], []
+        for k, (theta, t, r) in enumerate(args.sweep_base):
+            for g in args.sweep_gaps:
+                designs.append(DesignParams(theta_deg=theta, thickness=t, gap=g, radius=r))
+                origins.append(f"sweep:b{k}:gap={g:.3f}")
+        return designs, origins, [None] * len(designs)
+
     bounds = BOX_PRESETS[args.box]
     n_perturb = int(round(args.n * args.perturb_frac))
     n_random = args.n - n_perturb
@@ -178,6 +188,12 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
                         "and so cannot go through --reprocess-indices.")
     p.add_argument("--redo-rows", type=int, nargs="*", default=None,
                    help="ACCEPTED-row indices into --redo-shard (not attempted-row)")
+    p.add_argument("--sweep-base", type=float, nargs=3, action="append", default=None,
+                   metavar=("THETA", "T", "R"),
+                   help="skip sampling: hold theta/thickness/radius fixed and run every "
+                        "--sweep-gaps value. Repeat for several bases.")
+    p.add_argument("--sweep-gaps", type=float, nargs="+", default=None,
+                   help="gap values (units of a) for --sweep-base, run in the order given")
     p.add_argument("--edge-margin", type=int, default=2,
                    help="a window peak within this many grid points of either end "
                         "triggers a re-centre; see peak_window.peak_at_edge")
@@ -224,7 +240,8 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
         f"Peak campaign: {len(designs)} designs | box={args.box} "
         f"({sum(o == 'perturb' for o in origins)} perturb / "
         f"{sum(o == 'random' for o in origins)} random / "
-        f"{sum(o.startswith('reprocess') for o in origins)} reprocess)\n"
+        f"{sum(o.startswith('reprocess') for o in origins)} reprocess / "
+        f"{sum(o.startswith('sweep') for o in origins)} sweep)\n"
         f"  locate: N={args.locate_N}, f in [{args.f_min}, {args.f_max}] x {args.locate_pts}\n"
         f"  screen: peak|CD| >= {args.min_peak_cd}\n"
         f"  window: N={args.window_N}, +-{args.half_width:.1%} x {args.window_pts} pts "
@@ -427,7 +444,7 @@ def _write(records: list[dict], args, qr, complete: bool, elapsed: float) -> dic
         "param_names": PARAM_NAMES,
         "n_attempted": len(records),
         "n_accepted": int(accepted.sum()),
-        "n_requested": args.n,
+        "n_requested": len(args.sweep_base) * len(args.sweep_gaps) if args.sweep_base else args.n,
         "complete": complete,
         "box": args.box,
         "param_bounds": {k: list(v) for k, v in BOX_PRESETS[args.box].items()},
@@ -438,6 +455,8 @@ def _write(records: list[dict], args, qr, complete: bool, elapsed: float) -> dic
         "reprocess_indices": args.reprocess_indices,
         "redo_shard": args.redo_shard,
         "redo_rows": args.redo_rows,
+        "sweep_bases": args.sweep_base,
+        "sweep_gaps": args.sweep_gaps,
         "edge_margin": args.edge_margin,
         "max_recentre": args.max_recentre,
         "min_peak_cd": args.min_peak_cd,
