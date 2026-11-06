@@ -138,6 +138,10 @@ def build_designs(args) -> tuple[list[DesignParams], list[str], list[float | Non
         if not args.redo_rows:
             raise SystemExit("--redo-shard requires --redo-rows")
         designs, f_known = load_peak_shard_designs(args.redo_shard, args.redo_rows)
+        if args.redo_centres:
+            if len(args.redo_centres) != len(args.redo_rows):
+                raise SystemExit("--redo-centres needs one value per --redo-rows entry")
+            f_known = list(args.redo_centres)
         return designs, [f"redo:{args.redo_shard}:{i}" for i in args.redo_rows], f_known
 
     if args.reprocess_indices:
@@ -188,6 +192,9 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
                         "and so cannot go through --reprocess-indices.")
     p.add_argument("--redo-rows", type=int, nargs="*", default=None,
                    help="ACCEPTED-row indices into --redo-shard (not attempted-row)")
+    p.add_argument("--redo-centres", type=float, nargs="*", default=None,
+                   help="window centre (a/lambda) per --redo-rows entry, replacing the "
+                        "shard's f_peak. For designs whose stored window missed the mode.")
     p.add_argument("--sweep-base", type=float, nargs=3, action="append", default=None,
                    metavar=("THETA", "T", "R"),
                    help="skip sampling: hold theta/thickness/radius fixed and run every "
@@ -455,6 +462,7 @@ def _write(records: list[dict], args, qr, complete: bool, elapsed: float) -> dic
         "reprocess_indices": args.reprocess_indices,
         "redo_shard": args.redo_shard,
         "redo_rows": args.redo_rows,
+        "redo_centres": args.redo_centres,
         "sweep_bases": args.sweep_base,
         "sweep_gaps": args.sweep_gaps,
         "edge_margin": args.edge_margin,
