@@ -157,10 +157,14 @@ def build_designs(args) -> tuple[list[DesignParams], list[str], list[float | Non
         if not args.sweep_gaps:
             raise SystemExit("--sweep-base requires --sweep-gaps")
         designs, origins = [], []
-        for k, (theta, t, r) in enumerate(args.sweep_base):
-            for g in args.sweep_gaps:
-                designs.append(DesignParams(theta_deg=theta, thickness=t, gap=g, radius=r))
-                origins.append(f"sweep:b{k}:gap={g:.3f}")
+        for k, (theta, t_base, r) in enumerate(args.sweep_base):
+            for t in args.sweep_thicknesses or [t_base]:
+                for g in args.sweep_gaps:
+                    designs.append(DesignParams(theta_deg=theta, thickness=t, gap=g, radius=r))
+                    label = f"sweep:b{k}:gap={g:.3f}"
+                    if args.sweep_thicknesses:
+                        label = f"sweep:b{k}:t={t:.3f}:gap={g:.3f}"
+                    origins.append(label)
         return designs, origins, [None] * len(designs)
 
     bounds = BOX_PRESETS[args.box]
@@ -201,6 +205,10 @@ def main(argv: list[str] | None = None) -> dict[str, str]:
                         "--sweep-gaps value. Repeat for several bases.")
     p.add_argument("--sweep-gaps", type=float, nargs="+", default=None,
                    help="gap values (units of a) for --sweep-base, run in the order given")
+    p.add_argument("--sweep-thicknesses", type=float, nargs="+", default=None,
+                   help="slab thickness values (units of a) replacing each base's T. "
+                        "Runs every thickness x gap pair, thickness as the outer loop. "
+                        "Not limited by the sampler's thickness bound.")
     p.add_argument("--edge-margin", type=int, default=2,
                    help="a window peak within this many grid points of either end "
                         "triggers a re-centre; see peak_window.peak_at_edge")
@@ -451,7 +459,8 @@ def _write(records: list[dict], args, qr, complete: bool, elapsed: float) -> dic
         "param_names": PARAM_NAMES,
         "n_attempted": len(records),
         "n_accepted": int(accepted.sum()),
-        "n_requested": len(args.sweep_base) * len(args.sweep_gaps) if args.sweep_base else args.n,
+        "n_requested": (len(args.sweep_base) * len(args.sweep_thicknesses or [None])
+                        * len(args.sweep_gaps)) if args.sweep_base else args.n,
         "complete": complete,
         "box": args.box,
         "param_bounds": {k: list(v) for k, v in BOX_PRESETS[args.box].items()},
@@ -465,6 +474,7 @@ def _write(records: list[dict], args, qr, complete: bool, elapsed: float) -> dic
         "redo_centres": args.redo_centres,
         "sweep_bases": args.sweep_base,
         "sweep_gaps": args.sweep_gaps,
+        "sweep_thicknesses": args.sweep_thicknesses,
         "edge_margin": args.edge_margin,
         "max_recentre": args.max_recentre,
         "min_peak_cd": args.min_peak_cd,
