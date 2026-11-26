@@ -2,6 +2,7 @@
 # Tested on Python 3.14.4 (Windows) inside .venv.
 numpy>=2.0
 scipy>=1.13
+optuna>=5.1
 matplotlib>=3.8
 tqdm>=4.66
 

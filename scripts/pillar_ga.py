@@ -34,6 +34,43 @@ def profile_of(x):
     return tuple(rows)
 
 
+def evaluate_window(x, n_tio2, N, coarse, window, margin=5.0):
+    """Signed zeroth-order T_RCP - T_LCP averaged over `window` nm, best window wins.
+
+    Windows closer than `margin` nm to the lattice diffraction edge (1.46 * period)
+    are not allowed, because responses there are narrow cusps.
+    """
+    kw = dict(n_tio2=n_tio2, gap_nm=x[4], twist_deg=x[5], period_nm=x[0], profile=profile_of(x), N=N)
+    edge = 1.46 * x[0]
+
+    def best(lam, step):
+        r = simulate_pillars(lam, **kw)
+        ok = np.isfinite(r.residual) & (r.residual < 1e-3)
+        d = np.where(ok, r.T0[:, 0] - r.T0[:, 1], 0.0)
+        m = max(1, int(round(window / step / 2)))
+        idx = np.arange(m, len(lam) - m)
+        half = max(m * step, window / 2)
+        idx = idx[np.abs(lam[idx] - edge) >= half + margin]
+        if len(idx) == 0:
+            return r, None, 0.0
+        mean = np.array([d[i - m:i + m + 1].mean() for i in idx])
+        j = int(np.argmax(np.abs(mean)))
+        return r, (idx[j], m), float(abs(mean[j]))
+
+    r, hit, _ = best(np.arange(550, 700.1, coarse), coarse)
+    half = window / 2
+    c = r.wavelengths_nm[hit[0]]
+    f, hit2, fit = best(c + np.arange(-half - 4, half + 4.01, 0.5), 0.5)
+    if hit2 is None:
+        return {"fitness": 0.0, "lam": float(c), "cd0": 0.0, "T0": [0.0, 0.0], "residual": float(f.residual.max()),
+                "edge": float(edge), "coarse_T0": r.T0.round(5).tolist()}
+    i, m = hit2
+    t = f.T0[i - m:i + m + 1].mean(0)
+    return {"fitness": fit, "lam": float(f.wavelengths_nm[i]), "cd0": float((t[0] - t[1]) / t.sum()),
+            "T0": t.tolist(), "residual": float(f.residual[i - m:i + m + 1].max()), "edge": float(edge),
+            "coarse_T0": r.T0.round(5).tolist()}
+
+
 def evaluate(x, n_tio2, N, coarse):
     kw = dict(n_tio2=n_tio2, gap_nm=x[4], twist_deg=x[5], period_nm=x[0], profile=profile_of(x), N=N)
 
@@ -61,6 +98,7 @@ def main():
     ap.add_argument("--N", type=int, default=2)
     ap.add_argument("--coarse", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--window", type=float, default=0.0, help="average over this many nm (0 = single wavelength)")
     ap.add_argument("--tag", default="")
     a = ap.parse_args()
     path = os.path.join(ROOT, "datasets", "raw", f"pillar_{a.mode}{a.tag}.jsonl")
@@ -71,13 +109,16 @@ def main():
         """Evaluate, or replay from the log. None when the budget is spent."""
         k = len(log)
         if k < len(old):
+            assert old[k].get("window", 0.0) == a.window, "log was made with another window"
             assert np.allclose(old[k]["x"], x), "log does not match this seed/configuration"
             rec = old[k]
         else:
             if time.time() - t0 > a.hours * 3600 or k >= a.max_evals:
                 return None
             rec = {"k": k, "gen": gen, "x": [float(v) for v in x], "n_tio2": a.n_tio2, "N": a.N,
-                   "seed": a.seed, **evaluate(x, a.n_tio2, a.N, a.coarse)}
+                   "seed": a.seed, "window": a.window,
+                   **(evaluate_window(x, a.n_tio2, a.N, a.coarse, a.window) if a.window
+                      else evaluate(x, a.n_tio2, a.N, a.coarse))}
             with open(path, "a") as f:
                 f.write(json.dumps(rec) + "\n")
             print(f"{a.mode} {k:4d} gen {gen:2d} fit {rec['fitness']:.3f} CD {rec['cd0']:+.3f} at {rec['lam']:.1f} "
