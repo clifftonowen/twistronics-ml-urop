@@ -9,7 +9,7 @@ the raw grid has no chance of recovering the true structure-to-response map.
 Fitting each polarization's transmission resonances separately -- rather than
 the raw CD curve, which is a normalized difference of two resonances and not
 itself a natural single-Fano quantity -- gives a smooth, low-dimensional target
-that is the direct computational analogue of CLAUDE.md's own recipe for CD:
+that matches the usual recipe for large CD in twisted bilayers:
 "a pair of chiral eigenmodes of opposite handedness, closely spaced in
 frequency". Q is also half of the project's primary device metric (CD, Q) and
 nothing upstream of this module measures it.
@@ -189,7 +189,7 @@ def fit_spectrum(lam: np.ndarray, y: np.ndarray, prominence: float | None = None
     fitted linewidth -- i.e. they've converged to essentially the same center.
     This is deliberately much tighter than a fixed nm distance: two genuinely
     distinct, closely-spaced resonances (e.g. the opposite-handedness mode
-    pairs CD depends on, CLAUDE.md's "pair of chiral eigenmodes... closely
+    pairs CD depends on, i.e. a "pair of chiral eigenmodes... closely
     spaced in frequency") have fitted centers separated by a sizeable fraction
     of their own linewidth and must NOT be merged, even if only a few nm apart
     in absolute terms.
@@ -215,7 +215,7 @@ def fit_spectrum(lam: np.ndarray, y: np.ndarray, prominence: float | None = None
     # candidate. Two independent resonances closer together than window_nm
     # would otherwise both sit inside one fit's window, and a single-Fano
     # model fit to a two-resonance superposition is not meaningful -- this is
-    # exactly the closely-spaced-mode-pair regime CD depends on (CLAUDE.md's
+    # exactly the closely-spaced-mode-pair regime CD depends on (a
     # "pair of chiral eigenmodes... closely spaced in frequency"), so it must
     # be handled here rather than assumed away. The floor ensures at least
     # ~8 grid points regardless of local grid resolution.
@@ -304,7 +304,7 @@ def match_rcp_lcp_modes(res_rcp: list[FitResult], res_lcp: list[FitResult],
     r2>0.98-0.999.
 
     Only fits with r2 >= min_r2 are eligible, and a pair is only feasible if
-    its splitting is within max_split_nm (CLAUDE.md's CD recipe requires
+    its splitting is within max_split_nm (large CD needs
     opposite-handedness modes closely spaced in frequency). Among feasible
     pairs, solves for the assignment that MAXIMIZES total predicted peak|CD|
     (Hungarian algorithm via `scipy.optimize.linear_sum_assignment`), instead
