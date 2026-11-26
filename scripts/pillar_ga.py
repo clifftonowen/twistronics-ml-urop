@@ -34,6 +34,55 @@ def profile_of(x):
     return tuple(rows)
 
 
+LO_WIDE = np.array([340, 60, 0.70, 120, 20, 10.0])
+HI_WIDE = np.array([480, 150, 1.00, 320, 300, 40.0])
+ANGLES = ((0.0, 0.0), (5.0, 0.0), (5.0, 45.0))   # (theta in the n=1.46 medium, phi), degrees
+
+
+def evaluate_robust(x, n_tio2, N, coarse, window, angles=ANGLES, margin=5.0, n_cand=2):
+    """Worst case over incidence angles of the window-averaged signed T_RCP - T_LCP.
+
+    A 2 nm scan at normal incidence picks the n_cand strongest windows (at least
+    `window` apart, `margin` nm clear of the normal-incidence diffraction edge). Each
+    is re-scanned at 0.5 nm at every angle; a window scores the smallest |mean| over
+    angles, and 0 if the sign changes between angles. 5 deg in the medium is about
+    7.3 deg in air.
+    """
+    kw = dict(n_tio2=n_tio2, gap_nm=x[4], twist_deg=x[5], period_nm=x[0], profile=profile_of(x), N=N)
+    edge = 1.46 * x[0]
+    lam = np.arange(550, 700.1, coarse)
+    r = simulate_pillars(lam, **kw)
+    d = r.T0[:, 0] - r.T0[:, 1]
+    m = max(1, int(round(window / coarse / 2)))
+    idx = np.arange(m, len(lam) - m)
+    idx = idx[np.abs(lam[idx] - edge) >= window / 2 + margin + 4]
+    mean = np.array([d[i - m:i + m + 1].mean() for i in idx])
+    cands = []
+    for j in np.argsort(-np.abs(mean)):
+        if all(abs(lam[idx[j]] - c) >= window for c in cands):
+            cands.append(lam[idx[j]])
+        if len(cands) == n_cand:
+            break
+    best = {"fitness": 0.0, "lam": float(cands[0]) if cands else 0.0, "cd0": 0.0, "per_angle": [], "T0": [0.0, 0.0]}
+    h = int(round(window / 0.5 / 2))
+    for c in cands:
+        fl = c + np.arange(-window / 2 - 4, window / 2 + 4.01, 0.5)
+        runs = [simulate_pillars(fl, theta_deg=t, phi_deg=p, **kw) for t, p in angles]
+        res = max(float(q.residual.max()) for q in runs)
+        ds = np.array([q.T0[:, 0] - q.T0[:, 1] for q in runs])                # (angles, wavelengths)
+        for i in range(h, len(fl) - h):
+            if abs(fl[i] - edge) < window / 2 + margin:
+                continue
+            mu = ds[:, i - h:i + h + 1].mean(1)
+            score = 0.0 if (np.sign(mu) != np.sign(mu[0])).any() or res > 1e-3 else float(np.abs(mu).min())
+            if score > best["fitness"]:
+                t = runs[0].T0[i - h:i + h + 1].mean(0)
+                best = {"fitness": score, "lam": float(fl[i]), "cd0": float((t[0] - t[1]) / t.sum()),
+                        "per_angle": mu.tolist(), "T0": t.tolist(), "residual": res}
+    best.update(edge=float(edge), coarse_T0=r.T0.round(5).tolist(), angles=[list(a) for a in angles])
+    return best
+
+
 def evaluate_window(x, n_tio2, N, coarse, window, margin=5.0):
     """Signed zeroth-order T_RCP - T_LCP averaged over `window` nm, best window wins.
 

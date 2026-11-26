@@ -10,7 +10,10 @@ to avoid forming the full scattering matrix:
     (2NM x 2NM, one per spectator order), then coupled once to the other layer;
   * both half spaces and the gap are the background, so they contribute only
     propagation phases;
-  * only the normal-incidence columns are solved for.
+  * only the columns of the incident (specular) order are solved for.
+Oblique incidence: theta is measured in the surrounding medium (n_bg), from the
+normal; phi is the azimuth from x. Polarisation vectors follow the stock solver
+(TE along k x z, TM along TE x k), so circular light is defined in that frame.
 Equality with the stock solver is asserted in scripts/check_pillars.py.
 
 Lengths are in units of the period. Light enters on the layer-1 side, and slices
@@ -137,21 +140,42 @@ def _big_solve(F, rhs, device):
     return np.linalg.solve(F, rhs)
 
 
-def _solve_point(freq, twist, N, slices, gap, device):
-    """Normal incidence, both circular polarisations -> (T0, T, R), each (2,)."""
+def _pols(kxi, kyi):
+    """Rows (Ex, Ey) of the RCP and LCP incident fields, as the stock solver builds them."""
+    kzi = np.sqrt(1 - kxi ** 2 - kyi ** 2)
+    k = np.array([kxi, kyi, kzi])
+    if np.hypot(kxi, kyi) < 1e-12:
+        te = np.array([0.0, 1.0, 0.0])
+    else:
+        te = np.cross(k, [0, 0, -1.0])
+        te /= np.linalg.norm(te)
+    tm = np.cross(te, k)
+    tm /= np.linalg.norm(tm)
+    return np.array([pte * te + ptm * tm for pte, ptm in (POL_RCP, POL_LCP)]).T[:2], kzi
+
+
+def _solve_point(freq, twist, N, slices, gap, device, theta=0.0, phi=0.0):
+    """Both circular polarisations -> (T0, T, R), each (2,). Angles in radians."""
     NM = (2 * N + 1) ** 2
-    if abs(freq - 1) < 1e-6 or abs(freq - np.sqrt(2)) < 1e-6:
-        freq += 2e-6    # exactly on a diffraction edge kz = 0 and the basis is singular
-    k0 = 2 * np.pi * freq
     g = np.arange(-N, N + 1)
     gx, gy = (a.ravel().astype(float) for a in np.meshgrid(g, g))   # x fastest
     c, s = np.cos(twist), np.sin(twist)
     hx, hy = gx * c + gy * s, gy * c - gx * s                       # layer-2 lattice
+    if twist == 0:
+        hx = hy = np.zeros(1)
+    for _ in range(20):     # exactly on a diffraction edge kz = 0 and the basis is singular
+        kxi, kyi = np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi)
+        qx = kxi - (gx[:, None] + hx[None]) / freq
+        qy = kyi - (gy[:, None] + hy[None]) / freq
+        if np.abs(1 - qx ** 2 - qy ** 2).min() > 1e-9:
+            break
+        freq += 2e-6
+    k0 = 2 * np.pi * freq
     mid = NM // 2
-    pols = np.array([[ptm, pte] for pte, ptm in (POL_RCP, POL_LCP)]).T  # rows x, y (TM=x, TE=y)
+    pols, kzi = _pols(kxi, kyi)
 
     if twist == 0:      # ordinary 2D problem; the 4D basis would be redundant
-        kx, ky = -gx / freq, -gy / freq
+        kx, ky = kxi - gx / freq, kyi - gy / freq
         S = layer_smat(kx, ky, slices, k0)
         kz = _kz(kx, ky)
         inc = np.zeros((2, NM, 2), complex)
@@ -164,8 +188,7 @@ def _solve_point(freq, twist, N, slices, gap, device):
         t = B21 @ v
         r = A11 @ inc + A12 @ (X * (B11 @ v))
     else:               # arrays below are indexed [g1, g2]
-        kx = -(gx[:, None] + hx[None]) / freq
-        ky = -(gy[:, None] + hy[None]) / freq
+        kx, ky = qx, qy
         kz = _kz(kx, ky)
         L1 = list(_POOL.map(lambda j: layer_smat(kx[:, j], ky[:, j], slices, k0), range(NM)))
         L2 = list(_POOL.map(lambda i: layer_smat(kx[i], ky[i], slices, k0), range(NM)))
@@ -198,22 +221,28 @@ def _solve_point(freq, twist, N, slices, gap, device):
     def power(e):
         ex, ey = e.reshape(2, -1, 2)
         ez = (kx[:, None] * ex + ky[:, None] * ey) / kz[:, None]
-        return (np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2) * kz.real[:, None]
+        return (np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2) * kz.real[:, None] / kzi
 
     pt, pr = power(t), power(r)
     return pt[len(pt) // 2], pt.sum(0), pr.sum(0)
 
 
 def simulate_pillars(wavelengths_nm, n_tio2=2.4, gap_nm=120.0, twist_deg=22.6199, period_nm=400.0,
-                     profile=PAPER_PROFILE, n_bg=1.46, N=2, device="gpu", n_cap=4, n_body=2):
-    """CD spectrum of two identical pillar arrays separated by gap_nm (base to cap)."""
+                     profile=PAPER_PROFILE, n_bg=1.46, N=2, device="gpu", n_cap=4, n_body=2,
+                     theta_deg=0.0, phi_deg=0.0):
+    """CD spectrum of two identical pillar arrays separated by gap_nm (base to cap).
+
+    theta_deg is the incidence angle inside the n_bg medium; from air through a flat
+    n_bg interface, sin(theta) = sin(theta_air) / n_bg.
+    """
     eps = (n_tio2 / n_bg) ** 2
     sl = []
     for L, r in profile_slices(profile, n_cap, n_body):
         E = disc_conv(eps, r / period_nm, N)
         sl.append((E, np.linalg.inv(E), L / period_nm))
     lam = np.asarray(wavelengths_nm, float)
-    out = [_solve_point(n_bg * period_nm / w, np.deg2rad(twist_deg), N, sl, gap_nm / period_nm, device)
+    out = [_solve_point(n_bg * period_nm / w, np.deg2rad(twist_deg), N, sl, gap_nm / period_nm, device,
+                        np.deg2rad(theta_deg), np.deg2rad(phi_deg))
            for w in lam]
     T0, T, R = (np.array(x) for x in zip(*out))
     return PillarResult(lam, T0, T, R)
